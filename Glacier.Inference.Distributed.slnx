@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Glacier.Inference.Distributed.Tests/Glacier.Inference.Distributed.Tests.csproj" />
+  </Folder>
+</Solution>
