@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj" />
+    <Project Path="src/Glacier.Inference.Distributed.Cli/Glacier.Inference.Distributed.Cli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Glacier.Inference.Distributed.Tests/Glacier.Inference.Distributed.Tests.csproj" />

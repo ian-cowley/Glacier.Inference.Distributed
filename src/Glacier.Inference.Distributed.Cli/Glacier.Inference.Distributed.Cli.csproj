@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <TieredPGO>true</TieredPGO>
+
+    <!-- NuGet / Tool Properties -->
+    <PackageId>Glacier.Inference.Distributed.Cli</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Ian Cowley</Authors>
+    <Company>Glacier High-Performance Ecosystem</Company>
+    <Description>Command-line interface (glacier-distributed) for the Glacier Distributed MoE Cluster. Launches heterogeneous pipeline coordinators and worker daemons across LAN nodes.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Inference.Distributed</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ian-cowley/Glacier.Inference.Distributed.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>llm;inference;distributed;cluster;cli;aot;glacier</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>glacier-distributed</ToolCommandName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Condition="Exists('..\..\README.md')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Glacier.Inference.Distributed\Glacier.Inference.Distributed.csproj" />
+    <PackageReference Include="Glacier.Inference" Version="1.2.20" />
+  </ItemGroup>
+</Project>
