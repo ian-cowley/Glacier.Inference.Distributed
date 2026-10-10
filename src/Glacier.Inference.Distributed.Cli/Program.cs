@@ -54,24 +54,39 @@ public static class Program
         int? totalLayers = null;
         int? dim = null;
         string? modelPath = null;
+        string? downloadTarget = null;
+        string? destDir = null;
+        int downloadStreams = 8;
         string prompt = "Mixture-of-Experts enables scaling parameter capacity across distributed home clusters by";
         string stagesArg = "192.168.1.108:5055";
 
         for (int i = 0; i < args.Length; i++)
         {
-            if ((args[i] == "--help" || args[i] == "-h"))
+            if (args[i] == "--help" || args[i] == "-h" || args[i] == "help")
             {
                 PrintUsage();
                 return 0;
             }
-            if (args[i] == "--role" && i + 1 < args.Length) role = args[++i].ToLowerInvariant();
-            if (args[i] == "--port" && i + 1 < args.Length && int.TryParse(args[++i], out int p)) port = p;
-            if (args[i] == "--tokens" && i + 1 < args.Length && int.TryParse(args[++i], out int t)) maxTokens = t;
-            if (args[i] == "--layers" && i + 1 < args.Length && int.TryParse(args[++i], out int l)) totalLayers = l;
-            if (args[i] == "--dim" && i + 1 < args.Length && int.TryParse(args[++i], out int d)) dim = d;
-            if (args[i] == "--model" && i + 1 < args.Length) modelPath = args[++i];
-            if (args[i] == "--prompt" && i + 1 < args.Length) prompt = args[++i];
-            if ((args[i] == "--stages" || args[i] == "--nodes") && i + 1 < args.Length) stagesArg = args[++i];
+            if ((args[i] == "download" || args[i] == "--download") && i + 1 < args.Length)
+            {
+                downloadTarget = args[++i];
+            }
+            else if (args[i] == "--dest" && i + 1 < args.Length) destDir = args[++i];
+            else if (args[i] == "--streams" && i + 1 < args.Length && int.TryParse(args[++i], out int s)) downloadStreams = s;
+            else if (args[i] == "--role" && i + 1 < args.Length) role = args[++i].ToLowerInvariant();
+            else if (args[i] == "--port" && i + 1 < args.Length && int.TryParse(args[++i], out int p)) port = p;
+            else if (args[i] == "--tokens" && i + 1 < args.Length && int.TryParse(args[++i], out int t)) maxTokens = t;
+            else if (args[i] == "--layers" && i + 1 < args.Length && int.TryParse(args[++i], out int l)) totalLayers = l;
+            else if (args[i] == "--dim" && i + 1 < args.Length && int.TryParse(args[++i], out int d)) dim = d;
+            else if (args[i] == "--model" && i + 1 < args.Length) modelPath = args[++i];
+            else if (args[i] == "--prompt" && i + 1 < args.Length) prompt = args[++i];
+            else if ((args[i] == "--stages" || args[i] == "--nodes") && i + 1 < args.Length) stagesArg = args[++i];
+        }
+
+        // If user invoked model downloader
+        if (!string.IsNullOrEmpty(downloadTarget))
+        {
+            return await ModelDownloader.DownloadModelAsync(downloadTarget, destDir, downloadStreams);
         }
 
         // Auto-detect layers and dim from model file if provided
@@ -115,13 +130,20 @@ public static class Program
 
     private static void PrintUsage()
     {
-        Console.WriteLine(@"Glacier Distributed Cluster CLI (glacier-distributed)
+        Console.WriteLine(@"Glacier Distributed Cluster CLI (glacier-distributed) - Pure C# .NET 10
 
 Usage:
-  glacier-distributed [options]
+  glacier-distributed download <preset|url> [--dest <dir>] [--streams <int>]
+  glacier-distributed --role <coordinator|worker> [options]
 
-Modes:
-  --role <coordinator|worker>     Role of this node (default: coordinator)
+Commands:
+  download <preset|url>           Download a large MoE model via parallel HTTP Range streams (Pure C#)
+                                  Presets: qwen2-57b, mixtral-8x22b, deepseek-coder-v2-lite
+                                  Or pass any direct Hugging Face GGUF URL
+
+Download Options:
+  --dest <dir>                    Destination directory for downloaded models (default: ./models)
+  --streams <int>                 Number of concurrent download sockets (default: 8)
 
 Coordinator Options:
   --stages <ip:port,...>          Comma-separated list of remote worker endpoints

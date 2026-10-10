@@ -72,7 +72,7 @@ Here is the complete step-by-step walkthrough to run a 57B or 141B model across 
 
 1. **.NET 10 SDK** installed on all cluster nodes ([Download .NET 10](https://dotnet.microsoft.com/download/dotnet/10.0)).
 2. **Local Area Network (LAN)**: All machines connected via gigabit Ethernet or Wi-Fi (e.g. `192.168.1.x` subnet).
-3. **Python 3.8+** (only needed for downloading the model files via the multi-stream script).
+3. **Zero Python / Zero C++ dependencies**: 100% pure C# .NET 10 runtime, downloader, and interconnect.
 
 ---
 
@@ -86,23 +86,33 @@ cd Glacier.Inference.Distributed
 
 ---
 
-### Step 2: Download the GGUF Model
+### Step 2: Download the GGUF Model (Pure C# / Native Shells)
 
-Glacier includes an 8-stream parallel HTTP Range downloader (`scripts/download_model.py`) that saturates gigabit connections (70–110 MB/s) to download large models without timeouts or stalls:
+Glacier provides a **pure C# multi-stream HTTP Range downloader** built directly into the CLI (`glacier-distributed download`). It opens 8 concurrent HTTP/2 sockets to saturate gigabit connections (70–110 MB/s), pre-allocating sparse files on disk with zero temporary parts:
 
-#### A. Download Qwen2-57B-A14B (25.62 GB, 28 Layers, 64 Experts)
+#### A. Download via Pure C# (.NET CLI)
 ```bash
-python scripts/download_model.py --model qwen2-57b --dest ./models
+# 1. Download Qwen2-57B-A14B (25.62 GB, 28 Layers, 64 Experts)
+dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- download qwen2-57b
+
+# 2. Download Mixtral-8x22B-Instruct (35.29 GB, 141B Params, 56 Layers @ IQ2_XXS)
+dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- download mixtral-8x22b
+
+# 3. Download Any Custom Hugging Face GGUF Model
+dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- download "https://huggingface.co/path/to/model.gguf"
 ```
 
-#### B. Download Mixtral-8x22B-Instruct (35.29 GB, 141B Params, 56 Layers, 8 Experts @ IQ2_XXS)
-```bash
-python scripts/download_model.py --model mixtral-8x22b-iq2 --dest ./models
+#### B. Download via Native OS Shell Scripts
+If you prefer native shell scripts without building the CLI first:
+```powershell
+# Windows (PowerShell):
+.\scripts\download_model.ps1 qwen2-57b
+.\scripts\download_model.ps1 mixtral-8x22b
 ```
-
-#### C. Download Any Custom Hugging Face GGUF Model
 ```bash
-python scripts/download_model.py --url "https://huggingface.co/path/to/model.gguf" --dest ./models
+# Linux / macOS (Bash):
+./scripts/download_model.sh qwen2-57b
+./scripts/download_model.sh mixtral-8x22b
 ```
 
 ---
