@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>preview</LangVersion>
+    <TieredPGO>true</TieredPGO>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
+
+    <!-- NuGet Package Properties -->
+    <PackageId>Glacier.Inference.Distributed</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Ian Cowley</Authors>
+    <Company>Glacier High-Performance Ecosystem</Company>
+    <Description>Distributed heterogeneous pipeline inference, cluster activation transport, and warm expert pool execution for the Glacier Ecosystem. Enables multi-node execution of large MoE and dense LLMs across heterogeneous GPU and CPU cluster topologies.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ian-cowley/Glacier.Inference.Distributed</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ian-cowley/Glacier.Inference.Distributed.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>llm;inference;distributed;cluster;pipeline;moe;activation;shuffle;net10;aot;glacier</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Condition="Exists('..\..\README.md')" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Cluster\src\Glacier.Cluster\Glacier.Cluster.csproj')">
+    <ProjectReference Include="..\..\..\Glacier.Cluster\src\Glacier.Cluster\Glacier.Cluster.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Cluster\src\Glacier.Cluster\Glacier.Cluster.csproj')">
+    <PackageReference Include="Glacier.Cluster" Version="1.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Glacier.Inference" Version="1.2.20" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Glacier.Inference.Distributed.Tests" />
+  </ItemGroup>
+</Project>

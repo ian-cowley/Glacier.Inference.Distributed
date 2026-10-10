@@ -1,0 +1,32 @@
+# Build and compilation outputs
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+BenchmarkDotNet.Artifacts/
+dist/
+publish/
+publish_linux/
+publish_win/
+nuget-local/
+
+# IDE and Editor files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Secrets & Environment variables (Zero Secrets Policy)
+*.env
+*.env.*
+appsettings.json
+appsettings.*.json
+!appsettings.template.json
+
+# Scratch and temporary testing files
+tmp/
+temp/
+*.log
