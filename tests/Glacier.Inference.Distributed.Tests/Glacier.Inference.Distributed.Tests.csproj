@@ -7,6 +7,7 @@
     <IsTestProject>true</IsTestProject>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 

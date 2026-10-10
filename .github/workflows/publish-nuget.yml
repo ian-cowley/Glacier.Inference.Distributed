@@ -19,11 +19,20 @@ jobs:
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
       NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      DOTNET_gcServer: 0
+      DOTNET_GCHeapHardLimit: '0x180000000'
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Configure runner swap
+        run: |
+          sudo fallocate -l 8G /mnt/swapfile_extra || sudo dd if=/dev/zero of=/mnt/swapfile_extra bs=1M count=8192
+          sudo chmod 600 /mnt/swapfile_extra
+          sudo mkswap /mnt/swapfile_extra
+          sudo swapon /mnt/swapfile_extra
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
@@ -36,18 +45,21 @@ jobs:
 
       - name: Wait for upstream NuGet packages to be available
         run: |
-          wait_for_nuget() {
-            local pkg=$1 ver=$2 timeout=1200 elapsed=0
-            echo "Waiting for $pkg $ver on nuget.org..."
-            until curl -sf "https://api.nuget.org/v3-flatcontainer/${pkg,,}/${ver}/${pkg,,}.${ver}.nupkg" -o /dev/null; do
-              if [ $elapsed -ge $timeout ]; then echo "TIMEOUT waiting for $pkg $ver" && exit 1; fi
-              echo "  $pkg $ver not yet available, retrying in 30s (${elapsed}s elapsed)..."
+          wait_for_restore() {
+            local timeout=1200 elapsed=0
+            echo "Waiting for upstream packages (Glacier.Inference 1.2.20 & Glacier.Cluster 1.0.0) to resolve via configured feeds..."
+            until dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj > /dev/null 2>&1; do
+              if [ $elapsed -ge $timeout ]; then
+                echo "TIMEOUT waiting for upstream packages to restore. Diagnostics:"
+                dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj
+                exit 1
+              fi
+              echo "  Packages not yet resolvable, retrying in 30s (${elapsed}s elapsed)..."
               sleep 30; elapsed=$((elapsed+30))
             done
-            echo "  $pkg $ver is available."
+            echo "  All upstream dependencies successfully resolved."
           }
-          wait_for_nuget Glacier.Inference 1.2.20
-          wait_for_nuget Glacier.Cluster 1.0.0
+          wait_for_restore
 
       - name: Restore dependencies
         run: dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj
