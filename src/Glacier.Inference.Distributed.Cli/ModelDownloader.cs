@@ -42,6 +42,27 @@ public static class ModelDownloader
             "https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
             9568912384L,
             "DeepSeek-Coder-V2-Lite (16B total, 2.4B active, 27 layers, 64 experts) @ Q4_K_M (8.91 GB)"
+        ),
+        ["deepseek-r1-14b"] = new(
+            "deepseek-r1-14b",
+            "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+            "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+            8988110240L,
+            "DeepSeek-R1-Distill-Qwen-14B (Dense reasoning model, 48 layers) @ Q4_K_M (8.37 GB)"
+        ),
+        ["qwen2.5-32b"] = new(
+            "qwen2.5-32b",
+            "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+            "https://huggingface.co/bartowski/Qwen2.5-32B-Instruct-GGUF/resolve/main/Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+            19851336576L,
+            "Qwen2.5-32B-Instruct (Dense flagship, 64 layers) @ Q4_K_M (18.49 GB)"
+        ),
+        ["qwen2.5-14b"] = new(
+            "qwen2.5-14b",
+            "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+            "https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+            8988110240L,
+            "Qwen2.5-14B-Instruct (Dense high-speed, 48 layers) @ Q4_K_M (8.37 GB)"
         )
     };
 

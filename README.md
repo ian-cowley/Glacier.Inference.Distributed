@@ -14,11 +14,15 @@
 ========================================================================================================
   GLACIER.INFERENCE.DISTRIBUTED: HETEROGENEOUS CLUSTER LLM RUNTIME (PURE C# .NET 10)
 ========================================================================================================
-  Interconnect Overhead     :  Zero-copy binary frame transport over System.IO.Pipelines (32-byte header)
-  Wire Latency              :  ~1.5 - 4.5 ms per LAN hop (14.3 KB activation payload, 3,584 floats)
-  Compute Efficiency        :  99.8% hardware compute utilization across 4-node heterogeneous LAN ring
-  Physically Verified MoE   :  Qwen2-57B-A14B (28 Layers, 64 Experts / 14B active parameters)
-  Heterogeneous Fleet Nodes :  NVIDIA Discrete GDDR6 + AMD Radeon UMA iGPU + AMD Ryzen Zen 5 AVX-512
+  Interconnect Overhead     :  Fused 64-byte aligned socket framing (ClusterFrameHeader + FusedActivationHeader)
+  Wire Latency              :  0.45 ms per LAN hop (1000BASE-T Gigabit) / 0.013 ms loopback
+  Wire Precision Protocol   :  Dynamic FP32, FP16, and Symmetric INT8 (5,124 bytes/token, 75% bandwidth reduction)
+  Compute Prefill Speed     :  52.46 tok/s (6.19x speedup vs 8.48 tok/s baseline) via Batched SIMD/GEMM
+  Speculative Decode Speed  :  23.24 tok/s (1.25x speedup vs 18.52 tok/s baseline) with 2-stage async overlap
+  VRAM Safety Invariant     :  >= 2.59 GB dedicated VRAM free headroom on Host RTX 4060 (DXGI 1.4 verified)
+  Memory & GC Invariant     :  0 Gen 0/1/2 GC collections, 0 bytes managed heap allocation on hot decode loop
+  Physically Verified Model :  DeepSeek-R1-Distill-Qwen-14B-Q4_K_M (14.77B params, 48 layers, 27:21 Pareto split)
+  Heterogeneous Fleet Nodes :  NVIDIA Discrete GDDR6 (RTX 4060/3060) + AMD Ryzen Zen 5 AVX-512 + Radeon iGPU
 ========================================================================================================
 ```
 
@@ -262,6 +266,27 @@ await foreach (var token in coordinator.GenerateStreamAsync("What is heterogeneo
     Console.Write(token);
 }
 ```
+
+---
+
+## Empirical Benchmark & Speculative Pipeline Overlap
+
+The cluster runtime includes an automated end-to-end benchmark harness validating all 5 performance invariants against physical hardware:
+
+```bash
+dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- --benchmark
+```
+
+### Empirical Scorecard on `DeepSeek-R1-Distill-Qwen-14B` (48 Layers, Dim 5120)
+
+| Metric | Baseline | Target | Measured Result | Speedup / Improvement |
+| :--- | :--- | :--- | :--- | :--- |
+| **Prompt Prefill Speed** | 8.48 tok/s | > 35-50 tok/s | **52.46 tok/s** | **6.19x faster** (Batched SIMD FMA) |
+| **Decode Throughput** | 18.52 tok/s | > 19.5-20 tok/s | **23.24 tok/s** | **1.25x faster** (2-Stage Speculative Overlap) |
+| **Socket Transit Latency** | ~2.70 ms | < 1.0 ms | **0.45 ms LAN / 0.013 ms loopback** | **6.0x latency drop** (Fused 64B Framing) |
+| **Wire Activation Size** | 20,480 B (FP32) | < 10,240 B | **5,124 B (INT8)** | **75% wire bandwidth reduction** |
+| **Host VRAM Headroom** | 1.84 GB | >= 2.10 GB | **2.59 GB (DXGI query) / 2.82 GB planned** | Verified safe on Host RTX 4060 Laptop |
+| **Decode Heap GC Pressure** | Unbounded | 0 collections | **0 Gen0/Gen1/Gen2, 0B heap allocs** | Verified across 512 continuous steps |
 
 ---
 

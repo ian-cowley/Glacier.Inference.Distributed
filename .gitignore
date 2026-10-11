@@ -29,4 +29,5 @@ appsettings.*.json
 # Scratch and temporary testing files
 tmp/
 temp/
+TestResults/
 *.log
