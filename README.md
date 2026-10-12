@@ -80,10 +80,10 @@ Download the pre-compiled native executable for your OS from the **[GitHub Relea
 
 | Operating System | Architecture | Archive | Contents |
 | :--- | :--- | :--- | :--- |
-| **Windows** | x64 (Intel/AMD) | `glacier-distributed-v1.1.0-win-x64.zip` | `glacier-distributed.exe` |
-| **Windows** | ARM64 | `glacier-distributed-v1.1.0-win-arm64.zip` | `glacier-distributed.exe` |
-| **Linux** | x64 (Ubuntu/Debian/Fedora/Arch) | `glacier-distributed-v1.1.0-linux-x64.tar.gz` | `glacier-distributed` |
-| **macOS** | Apple Silicon (M1/M2/M3/M4) | `glacier-distributed-v1.1.0-osx-arm64.tar.gz` | `glacier-distributed` |
+| **Windows** | x64 (Intel/AMD) | `glacier-distributed-v1.2.0-win-x64.zip` | `glacier-distributed.exe` |
+| **Windows** | ARM64 | `glacier-distributed-v1.2.0-win-arm64.zip` | `glacier-distributed.exe` |
+| **Linux** | x64 (Ubuntu/Debian/Fedora/Arch) | `glacier-distributed-v1.2.0-linux-x64.tar.gz` | `glacier-distributed` |
+| **macOS** | Apple Silicon (M1/M2/M3/M4) | `glacier-distributed-v1.2.0-osx-arm64.tar.gz` | `glacier-distributed` |
 
 Unzip and run directly from your terminal:
 ```bash

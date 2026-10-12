@@ -11,7 +11,7 @@
 
     <!-- NuGet Package Properties -->
     <PackageId>Glacier.Inference.Distributed</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Distributed heterogeneous pipeline inference, cluster activation transport, and warm expert pool execution for the Glacier Ecosystem. Enables multi-node execution of large MoE and dense LLMs across heterogeneous GPU and CPU cluster topologies.</Description>

@@ -9,6 +9,7 @@ publish/
 publish_linux/
 publish_win/
 nuget-local/
+artifacts/
 
 # IDE and Editor files
 .vs/
