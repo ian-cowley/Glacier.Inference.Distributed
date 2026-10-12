@@ -238,6 +238,70 @@ dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- \
 
 ---
 
+### Step 5: Run as an OpenAI / Ollama Compatible HTTP Service (`--serve`)
+
+You can run the distributed cluster coordinator as an **OpenAI-compatible HTTP service**, allowing drop-in connectivity from any OpenAI client library (Python SDK, Node.js, LangChain, AutoGen, Open WebUI, Continue.dev, Cursor):
+
+```bash
+# Launch coordinator in OpenAI serving mode on port 8080:
+glacier-distributed serve \
+  --model ./models/qwen2-57b-a14b-instruct-q3_k_m.gguf \
+  --stages 192.168.1.108:5055,192.168.1.101:5056,192.168.1.200:5057 \
+  --http-port 8080 \
+  --host 0.0.0.0
+```
+
+#### Endpoints Exposed:
+| Endpoint | Method | Format | Description |
+| :--- | :--- | :--- | :--- |
+| `/v1/chat/completions` | `POST` | OpenAI SSE / JSON | Full chat completions with streaming SSE (`stream: true`) and non-streaming |
+| `/v1/completions` | `POST` | OpenAI SSE / JSON | Standard prompt text completion |
+| `/v1/models` | `GET` | OpenAI JSON | Model discovery endpoint returning cluster model metadata |
+| `/v1/cluster/status` | `GET` | Glacier JSON | Real-time cluster stage topology, layer allocations, and backend hardware info |
+| `/health` | `GET` | JSON | Cluster health check |
+| `/api/chat` | `POST` | Ollama NDJSON / JSON | Ollama-compatible multi-turn chat |
+| `/api/generate` | `POST` | Ollama NDJSON / JSON | Ollama-compatible single prompt generation |
+| `/api/tags` | `GET` | Ollama JSON | Ollama-compatible model tags list |
+
+#### Connect Using the Official OpenAI Python SDK:
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="none"  # Or your GLACIER_API_KEY
+)
+
+response = client.chat.completions.create(
+    model="qwen2-57b-a14b-instruct-q3_k_m",
+    messages=[
+        {"role": "system", "content": "You are a helpful distributed AI assistant."},
+        {"role": "user", "content": "How does pipeline parallelism work across heterogeneous LAN nodes?"}
+    ],
+    stream=True
+)
+
+for chunk in response:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+#### Connect with cURL:
+```bash
+# Streaming chat completion:
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen2-57b-a14b-instruct-q3_k_m",
+    "messages": [{"role": "user", "content": "Explain quantum computing in one sentence."}],
+    "stream": true
+  }'
+
+# Inspect cluster stage topology:
+curl http://localhost:8080/v1/cluster/status
+```
+
+---
+
 ## Model Architecture & Sizing Reference
 
 | Model Architecture | Total Parameters | Active Params | Layers (`--layers`) | Hidden Dim (`--dim`) | Quantization | Size on Disk |

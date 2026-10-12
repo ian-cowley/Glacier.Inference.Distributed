@@ -31,6 +31,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\Glacier.Inference.Distributed\Glacier.Inference.Distributed.csproj" />
   </ItemGroup>
 

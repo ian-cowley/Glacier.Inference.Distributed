@@ -100,7 +100,7 @@ public sealed class D3D12ClusterStageModel : IClusterStageModel
     }
 }
 
-public static class Program
+public static partial class Program
 {
     private const int DefaultPort = 5055;
 
@@ -118,6 +118,10 @@ public static class Program
     {
         string role = "coordinator";
         int port = DefaultPort;
+        int httpPort = 8080;
+        string httpHost = "0.0.0.0";
+        string? apiKey = Environment.GetEnvironmentVariable("GLACIER_API_KEY");
+        bool serve = false;
         int maxTokens = -1; // Unlimited by default (generates until natural EOS)
         string? modelPath = null;
         string? downloadTarget = null;
@@ -141,11 +145,31 @@ public static class Program
             {
                 downloadTarget = args[++i];
             }
+            else if (args[i] == "serve" || args[i] == "--serve")
+            {
+                serve = true;
+            }
+            else if (args[i] == "--http-port" && i + 1 < args.Length && int.TryParse(args[++i], out int hp))
+            {
+                httpPort = hp;
+            }
+            else if (args[i] == "--host" && i + 1 < args.Length)
+            {
+                httpHost = args[++i];
+            }
+            else if (args[i] == "--api-key" && i + 1 < args.Length)
+            {
+                apiKey = args[++i];
+            }
             else if (args[i] == "--dest" && i + 1 < args.Length) destDir = args[++i];
             else if (args[i] == "--cache" && i + 1 < args.Length) cacheDir = args[++i];
             else if (args[i] == "--streams" && i + 1 < args.Length && int.TryParse(args[++i], out int s)) downloadStreams = s;
             else if (args[i] == "--role" && i + 1 < args.Length) role = args[++i].ToLowerInvariant();
-            else if (args[i] == "--port" && i + 1 < args.Length && int.TryParse(args[++i], out int p)) port = p;
+            else if (args[i] == "--port" && i + 1 < args.Length && int.TryParse(args[++i], out int p))
+            {
+                port = p;
+                httpPort = p;
+            }
             else if (args[i] == "--tokens" && i + 1 < args.Length && int.TryParse(args[++i], out int t)) maxTokens = t;
             else if (args[i] == "--model" && i + 1 < args.Length) modelPath = args[++i];
             else if (args[i] == "--prompt" && i + 1 < args.Length) prompt = args[++i];
@@ -175,7 +199,7 @@ public static class Program
 
         Console.WriteLine("================================================================================");
         Console.WriteLine("  GLACIER HETEROGENEOUS CLUSTER LLM RUNTIME (PURE C# .NET 10)");
-        Console.WriteLine($"  Role: {role.ToUpperInvariant()} | Machine: {Environment.MachineName}");
+        Console.WriteLine($"  Role: {role.ToUpperInvariant()} | Mode: {(serve ? "OPENAI / OLLAMA HTTP SERVICE" : (interactive ? "INTERACTIVE REPL" : "BENCHMARK / GENERATE"))}");
         Console.WriteLine($"  OS: {RuntimeInformation.OSDescription} ({RuntimeInformation.ProcessArchitecture})");
         Console.WriteLine($"  Hardware Threads: {Environment.ProcessorCount} Cores | Vector512: {System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}");
         Console.WriteLine("================================================================================\n");
@@ -194,7 +218,19 @@ public static class Program
             }
 
             var endpoints = ParseEndpoints(stagesArg);
-            return await RunCoordinatorAsync(endpoints, modelPath, prompt, maxTokens, cacheDir, interactive, layerAlloc, hostGpu);
+            return await RunCoordinatorAsync(
+                endpoints,
+                modelPath,
+                prompt,
+                maxTokens,
+                cacheDir,
+                interactive,
+                layerAlloc,
+                hostGpu,
+                serve,
+                httpHost,
+                httpPort,
+                apiKey);
         }
     }
 
@@ -203,9 +239,26 @@ public static class Program
         Console.WriteLine(@"Glacier Distributed Cluster CLI (glacier-distributed) - Pure C# .NET 10
 
 Usage:
+  glacier-distributed serve --model <path> [--http-port 8080] [--host 0.0.0.0]
   glacier-distributed download <preset|url> [--dest <dir>] [--streams <int>]
   glacier-distributed --role worker [--port <int>] [--cache <dir>]
   glacier-distributed --role coordinator --model <path> [options]
+
+Serve / OpenAI Compatible Service:
+  serve, --serve                  Run distributed cluster as an OpenAI & Ollama compatible HTTP server
+  --http-port, --port <int>       HTTP port to listen on (default: 8080)
+  --host <ip>                     Host address to bind HTTP server (default: 0.0.0.0)
+  --api-key <string>              Require Bearer token or x-api-key authentication (or set GLACIER_API_KEY)
+
+Endpoints Exposed in Serve Mode:
+  POST /v1/chat/completions       OpenAI Chat Completions (streaming SSE & non-streaming JSON)
+  POST /v1/completions            OpenAI Text Completions (streaming SSE & non-streaming JSON)
+  GET  /v1/models                 OpenAI Models list
+  GET  /v1/cluster/status         Cluster stage topology, latency, and hardware telemetry
+  GET  /health                    Cluster health check
+  POST /api/chat                  Ollama Chat endpoint (streaming ndjson & non-streaming JSON)
+  POST /api/generate              Ollama Generate endpoint (streaming ndjson & non-streaming JSON)
+  GET  /api/tags                  Ollama Tags list
 
 Coordinator Options:
   --model <path>                  Path to GGUF model file (e.g. Qwen2-57B or Mixtral-8x22B)
@@ -530,171 +583,25 @@ Worker Options:
         string cacheDir,
         bool interactive,
         string? layerAllocArg,
-        int hostGpuAdapter)
+        int hostGpuAdapter,
+        bool serve,
+        string httpHost,
+        int httpPort,
+        string? apiKey)
     {
-        Console.WriteLine($"[Coordinator] Inspecting Master GGUF Model: {Path.GetFileName(modelPath)}");
-        using var masterGguf = GgufFile.Open(modelPath);
+        using var session = await DistributedClusterSession.InitializeAsync(
+            remoteEndpoints,
+            modelPath,
+            cacheDir,
+            layerAllocArg,
+            hostGpuAdapter);
 
-        int totalLayers = masterGguf.BlockCount;
-        int dim = masterGguf.EmbeddingLength;
-        int vocabSize = masterGguf.Tensors.TryGetValue("token_embd.weight", out var ti) && ti != null
-            ? (int)ti.Dimensions[1]
-            : (int)masterGguf.GetMetadataUInt32("tokenizer.ggml.tokens.length", 151936);
-
-        Console.WriteLine($"[Coordinator] Model Architecture: {masterGguf.Architecture} | Total Layers: {totalLayers} | Dim: {dim} | Vocab: {vocabSize}");
-
-        // Load Tokenizer
-        Console.WriteLine("[Coordinator] Loading BPE Tokenizer from GGUF metadata...");
-        var tokenizer = new BpeTokenizer(masterGguf);
-        Console.WriteLine($"[Coordinator] Tokenizer ready! VocabSize={tokenizer.VocabSize}, EOS={tokenizer.EosTokenId}");
-
-        // Solve optimal resource allocation using ClusterResourcePlanner
-        ulong totalModelBytes = (ulong)new FileInfo(modelPath).Length;
-        var localProfiles = ClusterResourcePlanner.DetectLocalNodes(hostGpuAdapter);
-        var remoteProfiles = remoteEndpoints.Select(ClusterResourcePlanner.ResolveRemoteNode).ToList();
-        var activeAllocations = ClusterResourcePlanner.PlanStages(localProfiles, remoteProfiles, totalLayers, totalModelBytes, layerAllocArg);
-
-        int numStages = activeAllocations.Count;
-        var stages = new StageTelemetry[numStages];
-        for (int i = 0; i < numStages; i++)
+        if (serve)
         {
-            var alloc = activeAllocations[i];
-            stages[i] = new StageTelemetry
-            {
-                Name = alloc.Node.Name,
-                Host = alloc.Node.Host,
-                Port = alloc.Node.Port,
-                StartLayer = alloc.StartLayer,
-                EndLayer = alloc.EndLayer
-            };
+            return await RunServeAsync(session, httpHost, httpPort, apiKey);
         }
 
-        // ---------------------------------------------------------------------
-        // 1. PREPARE LOCAL HOST STAGES (MULTI-GPU SUPPORT: RTX 4060 + 890M)
-        // ---------------------------------------------------------------------
-        var localModels = new List<IClusterStageModel>();
-        var localGgufs = new List<GgufFile>();
-
-        for (int s = 0; s < numStages; s++)
-        {
-            var alloc = activeAllocations[s];
-            if (!alloc.Node.IsLocal) break;
-
-            var stInfo = stages[s];
-            bool isFirst = (s == 0);
-            bool isLast = alloc.IsLastStage;
-
-            string sliceFileName = GgufStageSlicer.GetStageFileName(modelPath, s, stInfo.StartLayer, stInfo.EndLayer);
-            string localPath = Path.Combine(cacheDir, sliceFileName);
-            ulong expectedBytes = GgufStageSlicer.CalculateStageByteSize(masterGguf, stInfo.StartLayer, stInfo.EndLayer, isFirstStage: isFirst, isLastStage: isLast);
-
-            if (!File.Exists(localPath) || (ulong)new FileInfo(localPath).Length != expectedBytes)
-            {
-                Console.WriteLine($"[Stage {s}] Slicing {stInfo.Name} ({stInfo.LayerCount}L{(isFirst ? " + Embedding" : "")}) locally to {sliceFileName}...");
-                GgufStageSlicer.SliceStageToFile(masterGguf, localPath, stInfo.StartLayer, stInfo.EndLayer, isFirstStage: isFirst, isLastStage: isLast);
-                Console.WriteLine($"[Stage {s}] Slice complete ({new FileInfo(localPath).Length:N0} bytes).");
-            }
-            else
-            {
-                Console.WriteLine($"[Stage {s}] Using cached local stage file: {sliceFileName}");
-            }
-
-            var gguf = GgufFile.Open(localPath);
-            localGgufs.Add(gguf);
-            var weights = new ModelWeights(gguf);
-            var model = CreateStageModel(weights, 4096, stInfo.StartLayer, stInfo.LayerCount, isLastStage: isLast, adapterIndex: alloc.Node.AdapterIndex);
-            localModels.Add(model);
-            Console.WriteLine($"[Stage {s}] {stInfo.Name} initialized successfully! Backend: {model.BackendName}\n");
-        }
-
-        // ---------------------------------------------------------------------
-        // 2. CONNECT TO REMOTE WORKERS & HANDSHAKE CACHE / STREAMING
-        // ---------------------------------------------------------------------
-        var tcpClients = new List<TcpClient>();
-        var streams = new List<NetworkStream>();
-
-        for (int s = localModels.Count; s < numStages; s++)
-        {
-            var alloc = activeAllocations[s];
-            var stInfo = stages[s];
-            bool isLast = alloc.IsLastStage;
-
-            string sliceFileName = GgufStageSlicer.GetStageFileName(modelPath, s, stInfo.StartLayer, stInfo.EndLayer);
-            ulong expectedBytes = GgufStageSlicer.CalculateStageByteSize(masterGguf, stInfo.StartLayer, stInfo.EndLayer, isFirstStage: false, isLastStage: isLast);
-
-            Console.Write($"[Coordinator] Connecting to Stage {s} [{stInfo.Name}] ({alloc.Node.Host}:{alloc.Node.Port})... ");
-            var client = new TcpClient();
-            client.NoDelay = true;
-            client.ReceiveBufferSize = 4 * 1024 * 1024;
-            client.SendBufferSize = 4 * 1024 * 1024;
-            await client.ConnectAsync(alloc.Node.Host, alloc.Node.Port);
-            Console.WriteLine("Connected!");
-
-            var stream = client.GetStream();
-            tcpClients.Add(client);
-            streams.Add(stream);
-
-            // Send MsgInitStage
-            byte[] nameBytes = Encoding.UTF8.GetBytes(sliceFileName);
-            int initLen = 28 + nameBytes.Length;
-            byte[] initPayload = new byte[initLen];
-            BitConverter.TryWriteBytes(initPayload.AsSpan(0, 4), s);
-            BitConverter.TryWriteBytes(initPayload.AsSpan(4, 4), stInfo.StartLayer);
-            BitConverter.TryWriteBytes(initPayload.AsSpan(8, 4), stInfo.EndLayer);
-            BitConverter.TryWriteBytes(initPayload.AsSpan(12, 4), isLast ? 1 : 0);
-            BitConverter.TryWriteBytes(initPayload.AsSpan(16, 8), expectedBytes);
-            BitConverter.TryWriteBytes(initPayload.AsSpan(24, 4), nameBytes.Length);
-            nameBytes.CopyTo(initPayload.AsSpan(28));
-
-            var initHdr = new ClusterFrameHeader(MsgInitStage, (ulong)s, (ulong)initLen);
-            byte[] initHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
-            MemoryMarshal.Write(initHdrBytes, in initHdr);
-            await stream.WriteAsync(initHdrBytes, 0, ClusterFrameHeader.HeaderSize);
-            await stream.WriteAsync(initPayload, 0, initLen);
-            await stream.FlushAsync();
-
-            // Read response
-            byte[] respHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
-            await ReadExactAsync(stream, respHdrBytes, 0, ClusterFrameHeader.HeaderSize);
-            byte[] respPayload = new byte[16];
-            await ReadExactAsync(stream, respPayload, 0, 16);
-
-            int status = BitConverter.ToInt32(respPayload, 0);
-            if (status == 0)
-            {
-                Console.WriteLine($"[Stage {s}] Remote node has valid cached slice: {sliceFileName} (Ready in RAM/VRAM).");
-            }
-            else
-            {
-                Console.WriteLine($"[Stage {s}] Remote node cache miss. Slicing and streaming {sliceFileName} ({expectedBytes / (1024 * 1024):N1} MB) over gigabit LAN...");
-                var swStream = Stopwatch.StartNew();
-
-                // Slice directly to remote stream
-                using (var chunkWriter = new NetworkChunkWriter(stream, MsgStreamChunk))
-                {
-                    GgufStageSlicer.SliceStage(masterGguf, chunkWriter, stInfo.StartLayer, stInfo.EndLayer, isFirstStage: false, isLastStage: isLast);
-                }
-
-                // Send MsgStreamDone
-                var doneHdr = new ClusterFrameHeader(MsgStreamDone, (ulong)s, 0);
-                byte[] doneHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
-                MemoryMarshal.Write(doneHdrBytes, in doneHdr);
-                await stream.WriteAsync(doneHdrBytes, 0, ClusterFrameHeader.HeaderSize);
-                await stream.FlushAsync();
-
-                // Await final MsgStageReady
-                await ReadExactAsync(stream, respHdrBytes, 0, ClusterFrameHeader.HeaderSize);
-                await ReadExactAsync(stream, respPayload, 0, 16);
-                swStream.Stop();
-                Console.WriteLine($"[Stage {s}] Streaming & loading complete in {swStream.Elapsed.TotalSeconds:F1}s! Worker is ready.");
-            }
-        }
-
-        Console.WriteLine("\n[Cluster] All stages online and verified. Ready for inference!\n");
-
-        int currentPos = 0;
         string activePrompt = initialPrompt;
-
         while (true)
         {
             if (string.IsNullOrWhiteSpace(activePrompt))
@@ -709,9 +616,7 @@ Worker Options:
                 if (input.Equals("clear", StringComparison.OrdinalIgnoreCase) || input.Equals("reset", StringComparison.OrdinalIgnoreCase))
                 {
                     Console.WriteLine("[Cluster] Resetting conversation context on all nodes...");
-                    await BroadcastResetKvAsync(streams);
-                    foreach (var m in localModels) m.ResetKvCache();
-                    currentPos = 0;
+                    await session.ResetKvCacheAsync();
                     Console.WriteLine("[Cluster] KV cache cleared! Ready for new conversation.\n");
                     continue;
                 }
@@ -720,179 +625,48 @@ Worker Options:
 
             Console.WriteLine($"[Prompt]: \"{activePrompt}\"");
             Console.WriteLine("--------------------------------------------------------------------------------");
-            Console.WriteLine($"GENERATING REAL TOKENS ACROSS {numStages}-STAGE PIPELINE ({localModels.Count} Local GPU + {streams.Count} Remote LAN)");
+            Console.WriteLine($"GENERATING REAL TOKENS ACROSS {session.Stages.Length}-STAGE PIPELINE ({session.LocalModels.Count} Local GPU + {session.Streams.Count} Remote LAN)");
             Console.WriteLine("--------------------------------------------------------------------------------");
 
-            int[] promptTokens = tokenizer.Encode(activePrompt);
-            var swTotal = Stopwatch.StartNew();
-
-            float[] inX = new float[dim];
-            float[] outX = new float[dim];
-            float[] logits = new float[vocabSize];
-            int nextTokenId = promptTokens[0];
-
-            // Reset step invocation counters for this turn
-            for (int i = 0; i < numStages; i++)
+            var options = new SamplingOptions
             {
-                stages[i].TotalComputeMs = 0;
-                stages[i].TotalNetworkMs = 0;
-                stages[i].Invocations = 0;
-            }
+                MaxTokens = maxTokens <= 0 ? 4096 : maxTokens,
+                Temperature = 0.7f
+            };
 
-            // -----------------------------------------------------------------
-            // A. PREFILL PROMPT TOKENS (TOKENS READ)
-            // -----------------------------------------------------------------
-            var swPrefill = Stopwatch.StartNew();
-            for (int p = 0; p < promptTokens.Length; p++)
-            {
-                int tok = promptTokens[p];
-                bool isLastPromptToken = (p == promptTokens.Length - 1);
-
-                // Local stages (Host dGPU, Host iGPU)
-                float[] curIn = inX;
-                float[] curOut = outX;
-
-                for (int l = 0; l < localModels.Count; l++)
-                {
-                    bool isLastStage = (l == numStages - 1);
-                    bool computeLogits = isLastStage && isLastPromptToken;
-
-                    var swLocal = Stopwatch.StartNew();
-                    localModels[l].ForwardStage(tok, currentPos, curIn, curOut, logits, computeLogits);
-                    swLocal.Stop();
-
-                    stages[l].TotalComputeMs += swLocal.Elapsed.TotalMilliseconds;
-                    stages[l].Invocations++;
-                    curIn = curOut;
-                }
-
-                // Remote stages (Beast, etc.)
-                for (int s = localModels.Count; s < numStages; s++)
-                {
-                    bool isLastStage = (s == numStages - 1);
-                    bool computeLogits = isLastStage && isLastPromptToken;
-
-                    int streamIdx = s - localModels.Count;
-                    var stream = streams[streamIdx];
-                    var stInfo = stages[s];
-
-                    long tStart = Stopwatch.GetTimestamp();
-                    await SendActivationAsync(stream, (ulong)p, p, currentPos, computeLogits, dim, curOut);
-                    var res = await ReadResultAsync(stream, dim, curOut);
-                    long tEnd = Stopwatch.GetTimestamp();
-
-                    double rttMs = (tEnd - tStart) * 1000.0 / Stopwatch.Frequency;
-                    double netMs = Math.Max(0.01, rttMs - res.ComputeMs);
-
-                    stInfo.TotalComputeMs += res.ComputeMs;
-                    stInfo.TotalNetworkMs += netMs;
-                    stInfo.Invocations++;
-
-                    if (isLastStage && isLastPromptToken)
-                    {
-                        nextTokenId = res.NextTokenId;
-                    }
-                }
-
-                currentPos++;
-            }
-            swPrefill.Stop();
-
-            // -----------------------------------------------------------------
-            // B. AUTOREGRESSIVE GENERATION (TOKENS OUTPUT)
-            // -----------------------------------------------------------------
-            var swDecode = Stopwatch.StartNew();
-            int generatedCount = 0;
-            string firstPiece = tokenizer.DecodeToken(nextTokenId);
-            Console.Write(firstPiece);
-            generatedCount++;
-
-            int maxGen = maxTokens <= 0 ? int.MaxValue : maxTokens;
-            while (generatedCount < maxGen)
-            {
-                if (nextTokenId == tokenizer.EosTokenId || tokenizer.IsStopToken(nextTokenId))
-                {
-                    break;
-                }
-
-                // Local stages (Host dGPU, Host iGPU)
-                float[] curIn = inX;
-                float[] curOut = outX;
-
-                for (int l = 0; l < localModels.Count; l++)
-                {
-                    bool isLastStage = (l == numStages - 1);
-                    var swLocal = Stopwatch.StartNew();
-                    localModels[l].ForwardStage(nextTokenId, currentPos, curIn, curOut, logits, computeLogits: isLastStage);
-                    swLocal.Stop();
-
-                    stages[l].TotalComputeMs += swLocal.Elapsed.TotalMilliseconds;
-                    stages[l].Invocations++;
-                    curIn = curOut;
-                }
-
-                // Remote stages (Beast, etc.)
-                for (int s = localModels.Count; s < numStages; s++)
-                {
-                    bool isLastStage = (s == numStages - 1);
-                    int streamIdx = s - localModels.Count;
-                    var stream = streams[streamIdx];
-                    var stInfo = stages[s];
-
-                    long tStart = Stopwatch.GetTimestamp();
-                    await SendActivationAsync(stream, (ulong)generatedCount, generatedCount, currentPos, isLastStage, dim, curOut);
-                    var res = await ReadResultAsync(stream, dim, curOut);
-                    long tEnd = Stopwatch.GetTimestamp();
-
-                    double rttMs = (tEnd - tStart) * 1000.0 / Stopwatch.Frequency;
-                    double netMs = Math.Max(0.01, rttMs - res.ComputeMs);
-
-                    stInfo.TotalComputeMs += res.ComputeMs;
-                    stInfo.TotalNetworkMs += netMs;
-                    stInfo.Invocations++;
-
-                    if (isLastStage)
-                    {
-                        nextTokenId = res.NextTokenId;
-                    }
-                }
-
-                string piece = tokenizer.DecodeToken(nextTokenId);
-                Console.Write(piece);
-                currentPos++;
-                generatedCount++;
-            }
-            swDecode.Stop();
-            swTotal.Stop();
-
-            double prefillTokensPerSec = promptTokens.Length / Math.Max(0.0001, swPrefill.Elapsed.TotalSeconds);
-            double decodeTokensPerSec = generatedCount / Math.Max(0.0001, swDecode.Elapsed.TotalSeconds);
-            double decodeMsPerToken = swDecode.Elapsed.TotalMilliseconds / Math.Max(1, generatedCount);
+            var result = await session.GenerateAsync(
+                activePrompt,
+                options,
+                onToken: piece => Console.Write(piece));
 
             Console.WriteLine("\n\n================================================================================");
-            Console.WriteLine($"  {numStages}-STAGE PIPELINE INFERENCE BENCHMARK SUMMARY");
+            Console.WriteLine($"  {session.Stages.Length}-STAGE PIPELINE INFERENCE BENCHMARK SUMMARY");
             Console.WriteLine("================================================================================");
-            Console.WriteLine($"  Tokens Read (Prompt Prefill):   {promptTokens.Length} tokens in {swPrefill.Elapsed.TotalMilliseconds:F2} ms ({prefillTokensPerSec:F2} tok/s, {swPrefill.Elapsed.TotalMilliseconds / promptTokens.Length:F2} ms/tok)");
-            Console.WriteLine($"  Tokens Output (Generation):     {generatedCount} tokens in {swDecode.Elapsed.TotalMilliseconds:F2} ms ({decodeTokensPerSec:F2} tok/s, {decodeMsPerToken:F2} ms/tok)");
-            Console.WriteLine($"  Total Wall Clock Time:          {swTotal.Elapsed.TotalMilliseconds:F2} ms");
+            double prefillTokensPerSec = result.PromptTokens / Math.Max(0.0001, result.PromptDuration.TotalSeconds);
+            double decodeTokensPerSec = result.GeneratedTokens / Math.Max(0.0001, result.GenerationDuration.TotalSeconds);
+            double decodeMsPerToken = result.GenerationDuration.TotalMilliseconds / Math.Max(1, result.GeneratedTokens);
+
+            Console.WriteLine($"  Tokens Read (Prompt Prefill):   {result.PromptTokens} tokens in {result.PromptDuration.TotalMilliseconds:F2} ms ({prefillTokensPerSec:F2} tok/s)");
+            Console.WriteLine($"  Tokens Output (Generation):     {result.GeneratedTokens} tokens in {result.GenerationDuration.TotalMilliseconds:F2} ms ({decodeTokensPerSec:F2} tok/s, {decodeMsPerToken:F2} ms/tok)");
+            Console.WriteLine($"  Total Wall Clock Time:          {result.TotalDuration.TotalMilliseconds:F2} ms");
 
             double totalClusterCompute = 0;
             double totalClusterNet = 0;
             Console.WriteLine("\n  Stage Compute & Network Breakdown per Step:");
-            for (int i = 0; i < numStages; i++)
+            for (int i = 0; i < session.Stages.Length; i++)
             {
-                var st = stages[i];
+                var st = session.Stages[i];
                 double avgComp = st.Invocations > 0 ? st.TotalComputeMs / st.Invocations : 0;
                 double avgNet = st.Invocations > 0 ? st.TotalNetworkMs / st.Invocations : 0;
                 totalClusterCompute += avgComp;
                 totalClusterNet += avgNet;
 
-                string netStr = (i < localModels.Count) ? "Local Direct Memory (0.0 ms)" : $"{avgNet:F3} ms Gigabit LAN";
+                string netStr = (i < session.LocalModels.Count) ? "Local Direct Memory (0.0 ms)" : $"{avgNet:F3} ms Gigabit LAN";
                 Console.WriteLine($"    Stage {i} [{st.Name}]:");
                 Console.WriteLine($"      Layers {st.StartLayer}..{st.EndLayer} ({st.LayerCount}L) | Compute: {avgComp:F3} ms | Transit: {netStr}");
             }
 
-            double efficiency = (totalClusterCompute / (totalClusterCompute + totalClusterNet)) * 100.0;
+            double efficiency = (totalClusterCompute / Math.Max(0.001, totalClusterCompute + totalClusterNet)) * 100.0;
             Console.WriteLine($"\n  Total Compute Time:          {totalClusterCompute:F3} ms / token");
             Console.WriteLine($"  Total Network Transit Time:  {totalClusterNet:F3} ms / token");
             Console.WriteLine($"  Cluster Pipeline Efficiency: {efficiency:F1}% compute utilization");
@@ -901,23 +675,6 @@ Worker Options:
             activePrompt = "";
             if (!interactive) break;
         }
-
-        // Clean shutdown of remote daemons
-        for (int s = 0; s < streams.Count; s++)
-        {
-            try
-            {
-                var shutHdr = new ClusterFrameHeader(MsgShutdown, 0, 0);
-                byte[] shutBytes = new byte[ClusterFrameHeader.HeaderSize];
-                MemoryMarshal.Write(shutBytes, in shutHdr);
-                await streams[s].WriteAsync(shutBytes, 0, ClusterFrameHeader.HeaderSize);
-                await streams[s].FlushAsync();
-            }
-            catch { }
-        }
-
-        foreach (var m in localModels) m.Dispose();
-        foreach (var g in localGgufs) g.Dispose();
 
         return 0;
     }
@@ -996,7 +753,7 @@ Worker Options:
     /// <summary>
     /// Helper Stream adapter that flushes buffered chunks as discrete MsgStreamChunk frames over TCP.
     /// </summary>
-    private sealed class NetworkChunkWriter : Stream
+    public sealed class NetworkChunkWriter : Stream
     {
         private readonly NetworkStream _underlying;
         private readonly ClusterMessageType _msgType;

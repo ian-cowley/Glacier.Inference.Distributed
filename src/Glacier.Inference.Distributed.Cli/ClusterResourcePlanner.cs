@@ -380,6 +380,19 @@ public static class ClusterResourcePlanner
         return PlanStages(localNodes, remoteCandidates, totalLayers, 32UL * 1024 * 1024 * 1024, layerAllocArg);
     }
 
+    public static List<StageAllocation> CalculatePlan(
+        List<NodeResourceProfile> localNodes,
+        List<NodeResourceProfile> remoteCandidates,
+        int totalLayers,
+        ulong totalModelBytes,
+        string? layerAllocArg) => PlanStages(localNodes, remoteCandidates, totalLayers, totalModelBytes, layerAllocArg);
+
+    public static List<StageAllocation> CalculatePlan(
+        List<NodeResourceProfile> localNodes,
+        List<NodeResourceProfile> remoteCandidates,
+        int totalLayers,
+        string? layerAllocArg) => PlanStages(localNodes, remoteCandidates, totalLayers, layerAllocArg);
+
     public static List<StageAllocation> PlanStages(
         List<NodeResourceProfile> localNodes,
         List<NodeResourceProfile> remoteCandidates,

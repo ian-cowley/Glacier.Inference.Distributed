@@ -21,9 +21,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\..\src\Glacier.Inference.Distributed\Glacier.Inference.Distributed.csproj" />
+    <ProjectReference Include="..\..\src\Glacier.Inference.Distributed.Cli\Glacier.Inference.Distributed.Cli.csproj" />
     <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
-    <Compile Include="..\..\..\scratch\GlacierPipelineCluster\ClusterResourcePlanner.cs" Link="ClusterResourcePlanner.cs" />
     <Compile Include="..\..\..\scratch\GlacierPipelineCluster\ClusterBenchmarkHarness.cs" Link="ClusterBenchmarkHarness.cs" />
   </ItemGroup>
 </Project>
