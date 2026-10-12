@@ -71,6 +71,39 @@ graph TD
 
 ---
 
+## 🚀 Installation & Quick Start
+
+You do **not** need to compile the source code to run `glacier-distributed`.
+
+### Option 1: Standalone Single-File Executables (No .NET SDK Required)
+Download the pre-compiled native executable for your OS from the **[GitHub Releases](https://github.com/ian-cowley/Glacier.Inference.Distributed/releases)** page:
+
+| Operating System | Architecture | Archive | Contents |
+| :--- | :--- | :--- | :--- |
+| **Windows** | x64 (Intel/AMD) | `glacier-distributed-v1.1.0-win-x64.zip` | `glacier-distributed.exe` |
+| **Windows** | ARM64 | `glacier-distributed-v1.1.0-win-arm64.zip` | `glacier-distributed.exe` |
+| **Linux** | x64 (Ubuntu/Debian/Fedora/Arch) | `glacier-distributed-v1.1.0-linux-x64.tar.gz` | `glacier-distributed` |
+| **macOS** | Apple Silicon (M1/M2/M3/M4) | `glacier-distributed-v1.1.0-osx-arm64.tar.gz` | `glacier-distributed` |
+
+Unzip and run directly from your terminal:
+```bash
+# Windows
+glacier-distributed.exe --help
+
+# Linux / macOS
+chmod +x glacier-distributed
+./glacier-distributed --help
+```
+
+### Option 2: Global .NET Tool
+If you have the .NET SDK installed, install `glacier-distributed` globally with one command:
+```bash
+dotnet tool install -g Glacier.Inference.Distributed.Cli
+glacier-distributed --help
+```
+
+---
+
 ## Complete Turnkey Setup & Cluster Run Guide
 
 Here is the complete step-by-step walkthrough to run a 57B or 141B model across 2, 3, or 4 nodes on your network.

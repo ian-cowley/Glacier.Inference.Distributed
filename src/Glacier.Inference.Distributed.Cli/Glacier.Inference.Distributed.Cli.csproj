@@ -23,6 +23,7 @@
 
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>glacier-distributed</ToolCommandName>
+    <AssemblyName>glacier-distributed</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
