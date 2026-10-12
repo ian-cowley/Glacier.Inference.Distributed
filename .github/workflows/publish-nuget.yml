@@ -62,14 +62,20 @@ jobs:
           wait_for_restore
 
       - name: Restore dependencies
-        run: dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj
+        run: |
+          dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj
+          dotnet restore src/Glacier.Inference.Distributed.Cli/Glacier.Inference.Distributed.Cli.csproj
 
       - name: Build
-        run: dotnet build src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj --configuration Release --no-restore
-
+        run: |
+          dotnet build src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj --configuration Release --no-restore
+          dotnet build src/Glacier.Inference.Distributed.Cli/Glacier.Inference.Distributed.Cli.csproj --configuration Release --no-restore
 
       - name: Pack Library
         run: dotnet pack src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj --configuration Release --output packages
+
+      - name: Pack CLI Tool
+        run: dotnet pack src/Glacier.Inference.Distributed.Cli/Glacier.Inference.Distributed.Cli.csproj --configuration Release --output packages
 
       - name: Publish to nuget.org
         if: env.NUGET_API_KEY != '' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/'))
@@ -78,3 +84,11 @@ jobs:
       - name: Publish to GitHub Packages
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')
         run: dotnet nuget push "packages/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source "github-packages" --skip-duplicate || true
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.nupkg
+          generate_release_notes: true
+

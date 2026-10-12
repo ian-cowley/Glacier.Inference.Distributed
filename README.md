@@ -8,6 +8,7 @@
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
 [![Native AOT](https://img.shields.io/badge/Native%20AOT-Ready-brightgreen.svg)](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
 [![NuGet Version](https://img.shields.io/nuget/v/Glacier.Inference.Distributed.svg)](https://www.nuget.org/packages/Glacier.Inference.Distributed/)
+[![DEV.to Article](https://img.shields.io/badge/DEV.to-Article-0a0a0a?logo=devdotto)](https://dev.to/iancowley/want-to-run-massive-ai-models-on-a-collection-of-home-pcs-1a9j)
 [![Ecosystem](https://img.shields.io/badge/Glacier-Ecosystem-blue)](https://github.com/ian-cowley)
 
 ```text
@@ -29,6 +30,8 @@
 ---
 
 ## What is Glacier.Inference.Distributed?
+
+> 📖 **Read the deep dive article on DEV.to:** [Want to Run Massive AI Models on a Collection of Home PCs?](https://dev.to/iancowley/want-to-run-massive-ai-models-on-a-collection-of-home-pcs-1a9j)
 
 `Glacier.Inference.Distributed` partitions massive open Large Language Models and **Mixture-of-Experts (MoE)** architectures (such as **Qwen2-57B** and **Mixtral-8x22B 141B**) across arbitrary $N$-machine clusters on a standard local area network (LAN).
 
