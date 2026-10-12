@@ -34,7 +34,7 @@
     <PackageReference Include="Glacier.Cluster" Version="1.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Glacier.Inference" Version="1.2.20" />
+    <PackageReference Include="Glacier.Inference" Version="1.3.0" />
   </ItemGroup>
 
   <ItemGroup>

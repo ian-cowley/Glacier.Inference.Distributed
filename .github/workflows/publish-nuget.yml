@@ -47,7 +47,7 @@ jobs:
         run: |
           wait_for_restore() {
             local timeout=1200 elapsed=0
-            echo "Waiting for upstream packages (Glacier.Inference 1.2.20 & Glacier.Cluster 1.0.0) to resolve via configured feeds..."
+            echo "Waiting for upstream packages (Glacier.Inference 1.3.0 & Glacier.Cluster 1.0.0) to resolve via configured feeds..."
             until dotnet restore src/Glacier.Inference.Distributed/Glacier.Inference.Distributed.csproj > /dev/null 2>&1; do
               if [ $elapsed -ge $timeout ]; then
                 echo "TIMEOUT waiting for upstream packages to restore. Diagnostics:"

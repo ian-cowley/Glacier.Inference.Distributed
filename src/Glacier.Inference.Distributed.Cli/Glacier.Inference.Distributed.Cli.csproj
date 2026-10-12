@@ -37,6 +37,6 @@
     <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj')">
-    <PackageReference Include="Glacier.Inference" Version="1.2.20" />
+    <PackageReference Include="Glacier.Inference" Version="1.3.0" />
   </ItemGroup>
 </Project>
