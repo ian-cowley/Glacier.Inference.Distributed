@@ -1,3 +1,5 @@
+![Glacier.Inference.Distributed Banner](assets/banner.jpg)
+
 # Glacier.Inference.Distributed
 
 <p align="center">
@@ -32,6 +34,10 @@
 ## What is Glacier.Inference.Distributed?
 
 > 📖 **Read the deep dive article on DEV.to:** [Want to Run Massive AI Models on a Collection of Home PCs?](https://dev.to/iancowley/want-to-run-massive-ai-models-on-a-collection-of-home-pcs-1a9j)
+
+<p align="center">
+  <img src="assets/architecture.jpg" alt="Glacier.Inference.Distributed Architecture Blueprint" width="100%" />
+</p>
 
 `Glacier.Inference.Distributed` partitions massive open Large Language Models and **Mixture-of-Experts (MoE)** architectures (such as **Qwen2-57B** and **Mixtral-8x22B 141B**) across arbitrary $N$-machine clusters on a standard local area network (LAN).
 
