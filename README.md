@@ -405,6 +405,12 @@ dotnet run --project src/Glacier.Inference.Distributed.Cli -c Release -- --bench
 
 ---
 
+## Credits
+
+Developed by **Ian Cowley** and **Antigravity (Google DeepMind)**.
+
+---
+
 ## License
 
 MIT License. Copyright (c) 2026 Ian Cowley.
