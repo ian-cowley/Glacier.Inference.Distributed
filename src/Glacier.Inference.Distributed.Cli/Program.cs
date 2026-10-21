@@ -1,7 +1,6 @@
 namespace Glacier.Inference.Distributed.Cli;
 
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -15,9 +14,7 @@ using Glacier.Cluster.Protocol;
 using Glacier.Inference.Gguf;
 using Glacier.Inference.Memory;
 using Glacier.Inference.Model;
-using Glacier.Inference.Gpu;
 using Glacier.Inference.Gpu.D3D12;
-using Glacier.Inference.Distributed.Pipeline;
 using Glacier.Inference.Sampling;
 using Glacier.Inference.Tokenizer;
 
@@ -36,6 +33,12 @@ public class StageTelemetry
     public int Invocations { get; set; }
 }
 
+public interface IClusterStageModel : IDisposable
+{
+    string BackendName { get; }
+    void ForwardStage(int token, int pos, ReadOnlySpan<float> inputX, Span<float> outputX, Span<float> logits, bool computeLogits);
+    void ResetKvCache();
+}
 
 public sealed class CpuClusterStageModel : IClusterStageModel
 {
@@ -55,11 +58,6 @@ public sealed class CpuClusterStageModel : IClusterStageModel
         _model.ForwardStage(token, pos, inputX, outputX, logits, computeLogits, _kv);
     }
 
-    public void ForwardBatchStage(ReadOnlySpan<int> tokens, int startPos, ReadOnlySpan<float> inputXBatch, Span<float> outputXBatch, Span<float> logits, bool computeLogits)
-    {
-        _model.ForwardBatchStage(tokens, startPos, inputXBatch, outputXBatch, logits, computeLogits, _kv);
-    }
-
     public void ResetKvCache()
     {
         _kv.Reset();
@@ -74,11 +72,11 @@ public sealed class CpuClusterStageModel : IClusterStageModel
 
 public sealed class D3D12ClusterStageModel : IClusterStageModel
 {
-    private readonly ID3D12Model _model;
+    private readonly Qwen2D3D12Model _model;
     private readonly D3D12Context _ctx;
     public string BackendName { get; }
 
-    public D3D12ClusterStageModel(D3D12Context ctx, ID3D12Model model, string backendName)
+    public D3D12ClusterStageModel(D3D12Context ctx, Qwen2D3D12Model model, string backendName)
     {
         _ctx = ctx;
         _model = model;
@@ -88,11 +86,6 @@ public sealed class D3D12ClusterStageModel : IClusterStageModel
     public void ForwardStage(int token, int pos, ReadOnlySpan<float> inputX, Span<float> outputX, Span<float> logits, bool computeLogits)
     {
         _model.ForwardStage(token, pos, inputX, outputX, logits, computeLogits);
-    }
-
-    public void ForwardBatchStage(ReadOnlySpan<int> tokens, int startPos, ReadOnlySpan<float> inputXBatch, Span<float> outputXBatch, Span<float> logits, bool computeLogits)
-    {
-        _model.ForwardBatchStage(tokens, startPos, inputXBatch, outputXBatch, logits, computeLogits);
     }
 
     public void ResetKvCache()
@@ -136,7 +129,7 @@ public static partial class Program
         string? cacheDir = null;
         int downloadStreams = 8;
         string prompt = "Explain quantum computers to a layman.";
-        string stagesArg = "";
+        string stagesArg = "192.168.1.108:5055,192.168.1.101:5056,192.168.1.200:5057";
         string? layerAlloc = null;
         int hostGpu = -1;
         bool interactive = false;
@@ -213,7 +206,7 @@ public static partial class Program
 
         if (role == "worker")
         {
-            return await RunWorkerAsync(port, cacheDir, hostGpu);
+            return await RunWorkerAsync(port, cacheDir);
         }
         else
         {
@@ -287,13 +280,6 @@ Worker Options:
     {
         var list = new List<StageEndpoint>();
         if (string.IsNullOrWhiteSpace(stagesArg)) return list;
-        if (stagesArg.Equals("none", StringComparison.OrdinalIgnoreCase) ||
-            stagesArg.Equals("local", StringComparison.OrdinalIgnoreCase) ||
-            stagesArg.Equals("single", StringComparison.OrdinalIgnoreCase) ||
-            stagesArg.Equals("standalone", StringComparison.OrdinalIgnoreCase))
-        {
-            return list;
-        }
 
         var parts = stagesArg.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         int idx = 1;
@@ -326,22 +312,15 @@ Worker Options:
     // =========================================================================
     // WORKER DAEMON IMPLEMENTATION
     // =========================================================================
-    private static async Task<int> RunWorkerAsync(int port, string cacheDir, int adapterIndex = -1)
+    private static async Task<int> RunWorkerAsync(int port, string cacheDir)
     {
         Console.WriteLine($"[Worker] Starting Glacier Worker Daemon on port {port}...");
         Console.WriteLine($"[Worker] Cache directory: {Path.GetFullPath(cacheDir)}");
 
         var listener = new TcpListener(IPAddress.Any, port);
         listener.Server.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
-        listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-        {
-            listener.Server.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 5);
-            listener.Server.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 1);
-            listener.Server.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
-        }
         listener.Start();
-        Console.WriteLine($"[Worker] Listening on 0.0.0.0:{port} (NoDelay=true, KeepAlive=true). Awaiting coordinator...\n");
+        Console.WriteLine($"[Worker] Listening on 0.0.0.0:{port} (NoDelay=true). Awaiting coordinator...\n");
 
         byte[] headerBytes = new byte[ClusterFrameHeader.HeaderSize];
 
@@ -350,7 +329,9 @@ Worker Options:
             try
             {
                 using var client = await listener.AcceptTcpClientAsync();
-                FusedSocketTransport.ConfigureSocket(client.Client, 4 * 1024 * 1024);
+                client.NoDelay = true;
+                client.ReceiveBufferSize = 4 * 1024 * 1024;
+                client.SendBufferSize = 4 * 1024 * 1024;
                 Console.WriteLine($"[Worker] Coordinator connected from {client.Client.RemoteEndPoint}");
 
                 using var stream = client.GetStream();
@@ -408,37 +389,7 @@ Worker Options:
                                 stageGguf = GgufFile.Open(localSlicePath);
                                 stageWeights = new ModelWeights(stageGguf);
                                 dim = stageWeights.EmbeddingLength;
-
-                                using (var pingCts = new CancellationTokenSource())
-                                {
-                                    var pingTask = Task.Run(async () =>
-                                    {
-                                        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
-                                        byte[] pingBytes = new byte[ClusterFrameHeader.HeaderSize];
-                                        var pingHeader = new ClusterFrameHeader(ClusterMessageType.HeartbeatPing, (ulong)currentStageId, 0);
-                                        MemoryMarshal.Write(pingBytes, in pingHeader);
-                                        try
-                                        {
-                                            while (!pingCts.IsCancellationRequested && await timer.WaitForNextTickAsync(pingCts.Token).ConfigureAwait(false))
-                                            {
-                                                await stream.WriteAsync(pingBytes, 0, ClusterFrameHeader.HeaderSize, pingCts.Token).ConfigureAwait(false);
-                                                await stream.FlushAsync(pingCts.Token).ConfigureAwait(false);
-                                            }
-                                        }
-                                        catch (OperationCanceledException) { }
-                                        catch { }
-                                    }, pingCts.Token);
-
-                                    try
-                                    {
-                                        stageModel = CreateStageModel(stageWeights, 4096, startLayer, layerCount, isLastStage, adapterIndex);
-                                    }
-                                    finally
-                                    {
-                                        pingCts.Cancel();
-                                        try { await pingTask.ConfigureAwait(false); } catch { }
-                                    }
-                                }
+                                stageModel = CreateStageModel(stageWeights, 4096, startLayer, layerCount, isLastStage);
 
                                 Console.WriteLine($"[Worker] Stage {currentStageId} successfully loaded! Backend: {stageModel.BackendName} | Dim: {dim}");
 
@@ -451,11 +402,9 @@ Worker Options:
                                 // Send StageReady (status: 1 = need stream)
                                 SendStageReady(stream, status: 1, startLayer, endLayer, 0);
 
-                                // Receive streamed chunks into .tmp file using reusable pinned 4MB buffer pool
+                                // Receive streamed chunks into .tmp file
                                 string tempSlicePath = localSlicePath + ".stream.tmp";
                                 if (File.Exists(tempSlicePath)) File.Delete(tempSlicePath);
-
-                                byte[] chunkBuffer = GC.AllocateArray<byte>(4 * 1024 * 1024, pinned: true);
 
                                 using (var fs = new FileStream(tempSlicePath, FileMode.Create, FileAccess.Write, FileShare.None, 4 * 1024 * 1024))
                                 {
@@ -465,12 +414,6 @@ Worker Options:
                                         if (chunkHdrRead == 0) break;
 
                                         var chunkHdr = MemoryMarshal.Read<ClusterFrameHeader>(headerBytes);
-                                        if (chunkHdr.Magic != ClusterFrameHeader.MagicConstant)
-                                        {
-                                            Console.WriteLine($"[Worker] Invalid frame magic during chunk streaming: 0x{chunkHdr.Magic:X8}");
-                                            break;
-                                        }
-
                                         if (chunkHdr.MessageType == MsgStreamDone)
                                         {
                                             break;
@@ -479,23 +422,9 @@ Worker Options:
                                         if (chunkHdr.MessageType == MsgStreamChunk)
                                         {
                                             int cLen = (int)chunkHdr.PayloadLength;
-                                            if (cLen > chunkBuffer.Length)
-                                            {
-                                                chunkBuffer = GC.AllocateArray<byte>(cLen, pinned: true);
-                                            }
-                                            await ReadExactAsync(stream, chunkBuffer, 0, cLen);
-                                            await fs.WriteAsync(chunkBuffer.AsMemory(0, cLen));
-                                        }
-                                        else
-                                        {
-                                            // Drain unexpected frame payload during streaming
-                                            if (chunkHdr.PayloadLength > 0)
-                                            {
-                                                int pLen = (int)chunkHdr.PayloadLength;
-                                                byte[] discard = ArrayPool<byte>.Shared.Rent(pLen);
-                                                try { await ReadExactAsync(stream, discard, 0, pLen); }
-                                                finally { ArrayPool<byte>.Shared.Return(discard); }
-                                            }
+                                            byte[] cBuf = new byte[cLen];
+                                            await ReadExactAsync(stream, cBuf, 0, cLen);
+                                            await fs.WriteAsync(cBuf, 0, cLen);
                                         }
                                     }
                                 }
@@ -507,37 +436,7 @@ Worker Options:
                                 stageGguf = GgufFile.Open(localSlicePath);
                                 stageWeights = new ModelWeights(stageGguf);
                                 dim = stageWeights.EmbeddingLength;
-
-                                using (var pingCts = new CancellationTokenSource())
-                                {
-                                    var pingTask = Task.Run(async () =>
-                                    {
-                                        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
-                                        byte[] pingBytes = new byte[ClusterFrameHeader.HeaderSize];
-                                        var pingHeader = new ClusterFrameHeader(ClusterMessageType.HeartbeatPing, (ulong)currentStageId, 0);
-                                        MemoryMarshal.Write(pingBytes, in pingHeader);
-                                        try
-                                        {
-                                            while (!pingCts.IsCancellationRequested && await timer.WaitForNextTickAsync(pingCts.Token).ConfigureAwait(false))
-                                            {
-                                                await stream.WriteAsync(pingBytes, 0, ClusterFrameHeader.HeaderSize, pingCts.Token).ConfigureAwait(false);
-                                                await stream.FlushAsync(pingCts.Token).ConfigureAwait(false);
-                                            }
-                                        }
-                                        catch (OperationCanceledException) { }
-                                        catch { }
-                                    }, pingCts.Token);
-
-                                    try
-                                    {
-                                        stageModel = CreateStageModel(stageWeights, 4096, startLayer, layerCount, isLastStage, adapterIndex);
-                                    }
-                                    finally
-                                    {
-                                        pingCts.Cancel();
-                                        try { await pingTask.ConfigureAwait(false); } catch { }
-                                    }
-                                }
+                                stageModel = CreateStageModel(stageWeights, 4096, startLayer, layerCount, isLastStage);
 
                                 Console.WriteLine($"[Worker] Stage {currentStageId} successfully loaded & verified! Backend: {stageModel.BackendName} | Dim: {dim}");
                                 SendStageReady(stream, status: 0, startLayer, endLayer, dim);
@@ -638,58 +537,6 @@ Worker Options:
                         {
                             Console.WriteLine("[Worker] Received shutdown frame. Resetting session for next run.");
                             break;
-                        }
-                        // -------------------------------------------------------------
-                        // 4b. THROUGHPUT CALIBRATION PROBE
-                        // -------------------------------------------------------------
-                        else if (header.MessageType == Glacier.Inference.Distributed.Pipeline.DynamicThroughputCalibrator.MsgCalibrateProbeRequest)
-                        {
-                            Console.WriteLine("[Worker] Handling empirical throughput calibration probe...");
-                            await Glacier.Inference.Distributed.Pipeline.DynamicThroughputCalibrator.HandleProbeRequestAsync(stream, header);
-                        }
-                        // -------------------------------------------------------------
-                        // 5. HEARTBEAT PING & PONG
-                        // -------------------------------------------------------------
-                        else if (header.MessageType == ClusterMessageType.HeartbeatPing)
-                        {
-                            if (header.PayloadLength > 0)
-                            {
-                                int pLen = (int)header.PayloadLength;
-                                byte[] discard = ArrayPool<byte>.Shared.Rent(pLen);
-                                try { await ReadExactAsync(stream, discard, 0, pLen); }
-                                finally { ArrayPool<byte>.Shared.Return(discard); }
-                            }
-
-                            // Send HeartbeatPong reply
-                            var pongHdr = new ClusterFrameHeader(ClusterMessageType.HeartbeatPong, header.CorrelationId, 0);
-                            byte[] pBytes = new byte[ClusterFrameHeader.HeaderSize];
-                            MemoryMarshal.Write(pBytes, in pongHdr);
-                            await stream.WriteAsync(pBytes, 0, ClusterFrameHeader.HeaderSize);
-                            await stream.FlushAsync();
-                        }
-                        else if (header.MessageType == ClusterMessageType.HeartbeatPong)
-                        {
-                            if (header.PayloadLength > 0)
-                            {
-                                int pLen = (int)header.PayloadLength;
-                                byte[] discard = ArrayPool<byte>.Shared.Rent(pLen);
-                                try { await ReadExactAsync(stream, discard, 0, pLen); }
-                                finally { ArrayPool<byte>.Shared.Return(discard); }
-                            }
-                        }
-                        // -------------------------------------------------------------
-                        // 6. DEFENSIVE CATCH-ALL UNHANDLED FRAME DRAINER
-                        // -------------------------------------------------------------
-                        else
-                        {
-                            Console.WriteLine($"[Worker] Unhandled message opcode: 0x{(byte)header.MessageType:X2} (CorrelationId={header.CorrelationId}, PayloadLength={header.PayloadLength}). Safely draining payload to preserve stream synchronization...");
-                            if (header.PayloadLength > 0)
-                            {
-                                int pLen = (int)header.PayloadLength;
-                                byte[] discard = ArrayPool<byte>.Shared.Rent(pLen);
-                                try { await ReadExactAsync(stream, discard, 0, pLen); }
-                                finally { ArrayPool<byte>.Shared.Return(discard); }
-                            }
                         }
                     }
                 }
@@ -793,22 +640,15 @@ Worker Options:
                 onToken: piece => Console.Write(piece));
 
             Console.WriteLine("\n\n================================================================================");
-            Console.WriteLine("  [BENCHMARK CLASSIFICATION: END-TO-END DISTRIBUTED PIPELINE INFERENCE]");
-            Console.WriteLine($"  Topology: {session.Stages.Length}-Stage Heterogeneous Pipeline ({session.LocalModels.Count} Local GPU + {session.Streams.Count} Remote LAN Nodes)");
+            Console.WriteLine($"  {session.Stages.Length}-STAGE PIPELINE INFERENCE BENCHMARK SUMMARY");
             Console.WriteLine("================================================================================");
             double prefillTokensPerSec = result.PromptTokens / Math.Max(0.0001, result.PromptDuration.TotalSeconds);
-            double prefillMsPerToken = result.PromptDuration.TotalMilliseconds / Math.Max(1, result.PromptTokens);
             double decodeTokensPerSec = result.GeneratedTokens / Math.Max(0.0001, result.GenerationDuration.TotalSeconds);
             double decodeMsPerToken = result.GenerationDuration.TotalMilliseconds / Math.Max(1, result.GeneratedTokens);
-            double ttftMs = result.PromptDuration.TotalMilliseconds;
 
-            Console.WriteLine($"| {"Metric",-28} | {"Tokens",-8} | {"Duration (ms)",-14} | {"Throughput",-14} | {"Latency",-12} |");
-            Console.WriteLine($"|{new string('-', 30)}|{new string('-', 10)}|{new string('-', 16)}|{new string('-', 16)}|{new string('-', 14)}|");
-            Console.WriteLine($"| {"Tokens Read (Prompt Prefill)",-28} | {result.PromptTokens,8} | {$"{result.PromptDuration.TotalMilliseconds:F2} ms",-14} | {$"{prefillTokensPerSec:F2} tok/s",-14} | {$"{prefillMsPerToken:F2} ms/tok",-12} |");
-            Console.WriteLine($"| {"Tokens Out (Decode Generation)",-28} | {result.GeneratedTokens,8} | {$"{result.GenerationDuration.TotalMilliseconds:F2} ms",-14} | {$"{decodeTokensPerSec:F2} tok/s",-14} | {$"{decodeMsPerToken:F2} ms/tok",-12} |");
-            Console.WriteLine($"| {"Time to First Token (TTFT)",-28} | {1,8} | {$"{ttftMs:F2} ms",-14} | {$"{1000.0 / Math.Max(0.1, ttftMs):F2} tok/s",-14} | {$"{ttftMs:F2} ms",-12} |");
-            Console.WriteLine($"| {"Total End-to-End Execution",-28} | {result.PromptTokens + result.GeneratedTokens,8} | {$"{result.TotalDuration.TotalMilliseconds:F2} ms",-14} | {$"{(result.PromptTokens + result.GeneratedTokens) / Math.Max(0.0001, result.TotalDuration.TotalSeconds):F2} tok/s",-14} | {"-",-12} |");
-            Console.WriteLine($"|{new string('-', 30)}|{new string('-', 10)}|{new string('-', 16)}|{new string('-', 16)}|{new string('-', 14)}|");
+            Console.WriteLine($"  Tokens Read (Prompt Prefill):   {result.PromptTokens} tokens in {result.PromptDuration.TotalMilliseconds:F2} ms ({prefillTokensPerSec:F2} tok/s)");
+            Console.WriteLine($"  Tokens Output (Generation):     {result.GeneratedTokens} tokens in {result.GenerationDuration.TotalMilliseconds:F2} ms ({decodeTokensPerSec:F2} tok/s, {decodeMsPerToken:F2} ms/tok)");
+            Console.WriteLine($"  Total Wall Clock Time:          {result.TotalDuration.TotalMilliseconds:F2} ms");
 
             double totalClusterCompute = 0;
             double totalClusterNet = 0;
@@ -986,102 +826,20 @@ Worker Options:
         bool isLastStage,
         int adapterIndex = -1)
     {
-        // 1. On Windows, check Direct3D 12 first (hardware Wave32/DirectML)
-        if (OperatingSystem.IsWindows() && D3D12Context.IsSupported &&
-            (weights.ArchitectureFamily == UniversalArchitecture.Qwen ||
-             weights.ArchitectureFamily == UniversalArchitecture.Llama ||
-             weights.ArchitectureFamily == UniversalArchitecture.HybridSsm ||
-             weights.ArchitectureFamily == UniversalArchitecture.Generic))
+        // 1. Auto-detect GPU acceleration (Direct3D 12 on Windows)
+        if (OperatingSystem.IsWindows() && (weights.ArchitectureFamily == UniversalArchitecture.Qwen || weights.ArchitectureFamily == UniversalArchitecture.Llama || weights.ArchitectureFamily == UniversalArchitecture.Generic))
         {
-            int safeD3DAdapter = ResolveSafeD3D12AdapterIndex(adapterIndex);
-            var d3dModel = TryCreateD3D12StageModel(weights, maxSeqLen, startLayer, layerCount, isLastStage, safeD3DAdapter);
+            var d3dModel = TryCreateD3D12StageModel(weights, maxSeqLen, startLayer, layerCount, isLastStage, adapterIndex);
             if (d3dModel != null) return d3dModel;
         }
 
-        // 2. On Linux or Windows fallback, check Vulkan 1.1+ (RADV/NVIDIA/Intel compute shaders)
-        if (VulkanContext.IsSupported)
-        {
-            int safeVulkanDevice = ResolveSafeVulkanDeviceIndex(adapterIndex);
-            var vkModel = TryCreateVulkanStageModel(weights, maxSeqLen, startLayer, layerCount, isLastStage, safeVulkanDevice);
-            if (vkModel != null) return vkModel;
-        }
-
-        // 3. High-performance CPU SIMD fallback (AVX-512 / AVX2 / ARM AdvSIMD)
+        // 2. High-performance CPU SIMD fallback (AVX-512 / AVX2 / ARM AdvSIMD)
         string cpuSimd = System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated ? "AVX-512" :
                          (System.Runtime.Intrinsics.Vector256.IsHardwareAccelerated ? "AVX2" : "Scalar");
         Console.WriteLine($"[AutoCompute] Using CPU SIMD Runtime: {Environment.ProcessorCount} Cores ({cpuSimd})");
         var cpuModel = CpuModelFactory.Create(weights, maxSeqLen, startLayer, layerCount, isLastStage);
         var kv = new KVCache(layerCount, weights.HeadCountKv, weights.HeadDim, maxSeqLen);
         return new CpuClusterStageModel(cpuModel, kv, $"CPU SIMD ({Environment.ProcessorCount} Cores, {cpuSimd})");
-    }
-
-    public static int ResolveSafeD3D12AdapterIndex(int requestedIndex)
-    {
-        if (!OperatingSystem.IsWindows()) return -1;
-        try
-        {
-            var adapters = D3D12Context.EnumerateAdapters();
-            if (adapters.Count == 0) return -1;
-            if (requestedIndex < 0) return -1; // Auto-select highest dedicated VRAM
-            if (requestedIndex >= adapters.Count)
-            {
-                int clamped = adapters.Count - 1;
-                Console.WriteLine($"[AutoCompute] Warning: Requested D3D12 adapter index {requestedIndex} exceeds available count ({adapters.Count}). Clamping to index {clamped} ({adapters[clamped].Name}) to prevent CPU fallback.");
-                return clamped;
-            }
-            return requestedIndex;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[AutoCompute] Warning: D3D12 adapter enumeration failed: {ex.Message}. Defaulting to auto adapter.");
-            return -1;
-        }
-    }
-
-    public static int ResolveSafeVulkanDeviceIndex(int requestedIndex)
-    {
-        if (!VulkanContext.IsSupported) return 0;
-        try
-        {
-            var devices = VulkanContext.EnumerateDevices();
-            if (devices.Count == 0) return 0;
-            if (requestedIndex < 0) return 0;
-            if (requestedIndex >= devices.Count)
-            {
-                int clamped = devices.Count - 1;
-                Console.WriteLine($"[AutoCompute] Warning: Requested Vulkan device index {requestedIndex} exceeds available count ({devices.Count}). Clamping to index {clamped} ({devices[clamped].Name}) to prevent CPU fallback.");
-                return clamped;
-            }
-            return requestedIndex;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[AutoCompute] Warning: Vulkan device enumeration failed: {ex.Message}. Defaulting to device 0.");
-            return 0;
-        }
-    }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static IClusterStageModel? TryCreateVulkanStageModel(
-        ModelWeights weights,
-        int maxSeqLen,
-        int startLayer,
-        int layerCount,
-        bool isLastStage,
-        int deviceOrdinal = 0)
-    {
-        try
-        {
-            Console.WriteLine($"[AutoCompute] Initializing Vulkan compute backend on device {deviceOrdinal}...");
-            var vkStage = new Glacier.Inference.Distributed.Pipeline.VulkanClusterStageModel(weights, maxSeqLen, startLayer, layerCount, isLastStage, deviceOrdinal);
-            Console.WriteLine($"[AutoCompute] Vulkan GPU Engine Loaded! Backend: {vkStage.BackendName}");
-            return vkStage;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[AutoCompute] Vulkan GPU fallback: {ex.Message}");
-            return null;
-        }
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
@@ -1102,14 +860,6 @@ Worker Options:
 
             Console.WriteLine($"[AutoCompute] Detected GPU: {ctx.DeviceName}");
             Console.WriteLine($"[AutoCompute] VRAM: {dedicatedMb:N0} MB Dedicated, {sharedMb:N0} MB Shared ({totalMb:N0} MB Total Accessible)");
-
-            if (weights.ArchitectureFamily == UniversalArchitecture.HybridSsm)
-            {
-                var hybridModel = new Qwen3HybridD3D12Model(ctx, weights, maxSeqLen, startLayer, layerCount, isLastStage);
-                string hybridMode = hybridModel.TieredMoe ? "Heterogeneous VRAM+CPU Tiered HybridSSM+MoE" : "100% In-VRAM GPU Accelerated HybridSSM+MoE";
-                Console.WriteLine($"[AutoCompute] Direct3D 12 HybridSsm GPU Engine Loaded! Mode: {hybridMode}");
-                return new D3D12ClusterStageModel(ctx, hybridModel, $"D3D12 GPU HybridSsm ({ctx.DeviceName})");
-            }
 
             var d3dModel = new Qwen2D3D12Model(ctx, weights, maxSeqLen, KvCachePrecision.Auto, startLayer, layerCount, isLastStage);
             string modeStr = d3dModel.TieredMoe ? "Heterogeneous VRAM+CPU Tiered" : "100% In-VRAM GPU Accelerated";

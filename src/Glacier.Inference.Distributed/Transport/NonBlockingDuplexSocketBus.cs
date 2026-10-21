@@ -2,7 +2,6 @@ namespace Glacier.Inference.Distributed.Transport;
 
 using System;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -21,19 +20,16 @@ public readonly record struct TokenResultFrame(
 /// <summary>
 /// High-throughput non-blocking duplex transport bus decoupling GPU execution from TCP socket I/O.
 /// Features a background receive loop reading cluster result frames into a bounded Channel,
-/// zero-allocation unmanaged struct dispatch, an adaptive 60.0s per-token watchdog timeout, and clean cancellation.
+/// zero-allocation unmanaged struct dispatch, a 5.0s per-token watchdog timeout, and clean cancellation.
 /// </summary>
 public sealed class NonBlockingDuplexSocketBus : IDisposable
 {
-    public const double DefaultWatchdogSeconds = 60.0;
-
     private readonly Socket _socket;
     private readonly Channel<TokenResultFrame> _channel;
     private readonly byte[] _recvBuffer;
     private readonly Memory<byte> _recvMemory;
     private readonly CancellationTokenSource _cts = new();
     private CancellationTokenSource? _reusableWatchdogCts;
-    private volatile CancellationTokenSource? _activeWatchdogCts;
     private Task? _receiveTask;
     private int _disposed;
     private readonly TimeSpan _watchdogTimeout;
@@ -45,7 +41,7 @@ public sealed class NonBlockingDuplexSocketBus : IDisposable
     public NonBlockingDuplexSocketBus(Socket socket, int channelCapacity = 4, TimeSpan? watchdogTimeout = null)
     {
         _socket = socket ?? throw new ArgumentNullException(nameof(socket));
-        _watchdogTimeout = watchdogTimeout ?? TimeSpan.FromSeconds(DefaultWatchdogSeconds);
+        _watchdogTimeout = watchdogTimeout ?? TimeSpan.FromSeconds(5.0);
         _recvBuffer = new byte[FusedSocketTransport.CombinedHeaderSize + 1024];
         _recvMemory = _recvBuffer.AsMemory();
         _channel = Channel.CreateBounded<TokenResultFrame>(new BoundedChannelOptions(channelCapacity)
@@ -55,26 +51,6 @@ public sealed class NonBlockingDuplexSocketBus : IDisposable
             FullMode = BoundedChannelFullMode.Wait,
             AllowSynchronousContinuations = true
         });
-    }
-
-    /// <summary>
-    /// Computes an adaptive watchdog timeout scaled to prompt token length to accommodate longer prefill delays.
-    /// </summary>
-    public static TimeSpan CalculateAdaptiveTimeout(int promptTokens)
-    {
-        return TimeSpan.FromSeconds(Math.Max(DefaultWatchdogSeconds, 0.05 * promptTokens + 10.0));
-    }
-
-    /// <summary>
-    /// Resets the active watchdog cancellation timer upon receiving a heartbeat or activity from the peer.
-    /// </summary>
-    public void ResetWatchdog()
-    {
-        try
-        {
-            _activeWatchdogCts?.CancelAfter(_watchdogTimeout);
-        }
-        catch (ObjectDisposedException) { }
     }
 
     /// <summary>
@@ -99,29 +75,6 @@ public sealed class NonBlockingDuplexSocketBus : IDisposable
                 {
                     _channel.Writer.TryComplete();
                     break;
-                }
-
-                // Interleaved heartbeats keep the channel alive and reset the watchdog
-                if (clusterHdr.MessageType == ClusterMessageType.HeartbeatPing ||
-                    clusterHdr.MessageType == ClusterMessageType.HeartbeatPong)
-                {
-                    if (clusterHdr.MessageType == ClusterMessageType.HeartbeatPing)
-                    {
-                        var pongHdr = new ClusterFrameHeader(ClusterMessageType.HeartbeatPong, clusterHdr.CorrelationId, 0);
-                        byte[] pBytes = new byte[ClusterFrameHeader.HeaderSize];
-                        MemoryMarshal.Write(pBytes, in pongHdr);
-                        await _socket.SendAsync(pBytes, SocketFlags.None, ct).ConfigureAwait(false);
-                    }
-
-                    ResetWatchdog();
-                    continue;
-                }
-
-                // If not a token result frame, skip dispatch
-                if (clusterHdr.MessageType != (ClusterMessageType)0x71 || clusterHdr.PayloadLength < (ulong)FusedActivationResultHeader.HeaderSize)
-                {
-                    ResetWatchdog();
-                    continue;
                 }
 
                 var frame = new TokenResultFrame(
@@ -182,8 +135,6 @@ public sealed class NonBlockingDuplexSocketBus : IDisposable
             isLinked = true;
         }
 
-        _activeWatchdogCts = cts;
-
         try
         {
             var frame = await _channel.Reader.ReadAsync(cts.Token).ConfigureAwait(false);
@@ -199,10 +150,6 @@ public sealed class NonBlockingDuplexSocketBus : IDisposable
         }
         finally
         {
-            if (ReferenceEquals(_activeWatchdogCts, cts))
-            {
-                _activeWatchdogCts = null;
-            }
             if (isLinked)
             {
                 cts.Dispose();

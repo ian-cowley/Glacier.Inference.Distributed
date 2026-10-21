@@ -1,7 +1,6 @@
 namespace Glacier.Inference.Distributed;
 
 using System;
-using System.Buffers;
 using System.IO;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -18,12 +17,9 @@ using Glacier.Cluster.Protocol;
 public static class FusedSocketTransport
 {
     public const int CombinedHeaderSize = ClusterFrameHeader.HeaderSize + FusedActivationHeader.HeaderSize; // Exactly 64 bytes
-    public const ClusterMessageType MsgResult = (ClusterMessageType)0x71;
 
     /// <summary>
     /// Configures high-performance socket options for ultra-low latency cluster transit.
-    /// Sets TCP Keep-Alive, aggressive probe intervals (5s idle, 1s interval, 5 retries),
-    /// and 120s safety timeouts to prevent socket drops and silent connection resets.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void ConfigureSocket(Socket socket, int bufferSizeBytes = 4 * 1024 * 1024)
@@ -32,16 +28,6 @@ public static class FusedSocketTransport
         socket.NoDelay = true;
         socket.ReceiveBufferSize = bufferSizeBytes;
         socket.SendBufferSize = bufferSizeBytes;
-
-        socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-        {
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 5);
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 1);
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
-        }
-        socket.ReceiveTimeout = 120_000;
-        socket.SendTimeout = 120_000;
     }
 
     /// <summary>
@@ -296,7 +282,6 @@ public static class FusedSocketTransport
 
     /// <summary>
     /// Synchronously receives an activation result frame into pre-allocated memory.
-    /// Safely handles interleaved 32-byte HeartbeatPing and HeartbeatPong frames without frame desynchronization.
     /// </summary>
     public static bool ReceiveResult(
         Socket socket,
@@ -307,16 +292,8 @@ public static class FusedSocketTransport
     {
         ArgumentNullException.ThrowIfNull(socket);
 
-        if (targetBuffer.Length < ClusterFrameHeader.HeaderSize)
-        {
-            clusterHeader = default;
-            resultHeader = default;
-            payloadSpan = ReadOnlySpan<byte>.Empty;
-            return false;
-        }
-
-        int received = ReadExact(socket, targetBuffer.Slice(0, ClusterFrameHeader.HeaderSize));
-        if (received < ClusterFrameHeader.HeaderSize)
+        int received = ReadExact(socket, targetBuffer.Slice(0, CombinedHeaderSize));
+        if (received < CombinedHeaderSize)
         {
             clusterHeader = default;
             resultHeader = default;
@@ -325,55 +302,11 @@ public static class FusedSocketTransport
         }
 
         clusterHeader = MemoryMarshal.Read<ClusterFrameHeader>(targetBuffer.Slice(0, ClusterFrameHeader.HeaderSize));
-        if (clusterHeader.Magic != ClusterFrameHeader.MagicConstant || clusterHeader.PayloadLength > (ulong)int.MaxValue)
-        {
-            resultHeader = default;
-            payloadSpan = ReadOnlySpan<byte>.Empty;
-            return false;
-        }
-
-        // Defensive framing: If not a result frame or payload too short for FusedActivationResultHeader,
-        // safely drain any payload bytes using targetBuffer (if large enough) or ArrayPool<byte>.Shared
-        if (clusterHeader.MessageType != MsgResult || clusterHeader.PayloadLength < (ulong)FusedActivationResultHeader.HeaderSize)
-        {
-            if (!DrainPayload(socket, targetBuffer, (int)clusterHeader.PayloadLength))
-            {
-                resultHeader = default;
-                payloadSpan = ReadOnlySpan<byte>.Empty;
-                return false;
-            }
-
-            resultHeader = default;
-            payloadSpan = ReadOnlySpan<byte>.Empty;
-            return true;
-        }
-
-        if (targetBuffer.Length < CombinedHeaderSize)
-        {
-            resultHeader = default;
-            payloadSpan = ReadOnlySpan<byte>.Empty;
-            return false;
-        }
-
-        int actHdrRead = ReadExact(socket, targetBuffer.Slice(ClusterFrameHeader.HeaderSize, FusedActivationResultHeader.HeaderSize));
-        if (actHdrRead < FusedActivationResultHeader.HeaderSize)
-        {
-            resultHeader = default;
-            payloadSpan = ReadOnlySpan<byte>.Empty;
-            return false;
-        }
-
         resultHeader = FusedActivationResultHeader.ReadFrom(targetBuffer.Slice(ClusterFrameHeader.HeaderSize, FusedActivationResultHeader.HeaderSize));
         int payloadLen = (int)clusterHeader.PayloadLength - FusedActivationResultHeader.HeaderSize;
 
         if (payloadLen > 0)
         {
-            if (targetBuffer.Length < CombinedHeaderSize + payloadLen)
-            {
-                payloadSpan = ReadOnlySpan<byte>.Empty;
-                return false;
-            }
-
             int remaining = ReadExact(socket, targetBuffer.Slice(CombinedHeaderSize, payloadLen));
             if (remaining < payloadLen)
             {
@@ -388,7 +321,6 @@ public static class FusedSocketTransport
 
     /// <summary>
     /// Asynchronously receives an activation result frame returning a non-allocating ValueTask.
-    /// Safely handles interleaved 32-byte HeartbeatPing and HeartbeatPong frames without frame desynchronization.
     /// </summary>
     public static async ValueTask<(ClusterFrameHeader ClusterHdr, FusedActivationResultHeader ResultHdr, int PayloadLength)> ReceiveResultAsync(
         Socket socket,
@@ -397,56 +329,18 @@ public static class FusedSocketTransport
     {
         ArgumentNullException.ThrowIfNull(socket);
 
-        if (targetBuffer.Length < ClusterFrameHeader.HeaderSize)
-        {
-            return (default, default, 0);
-        }
-
-        int received = await ReadExactAsync(socket, targetBuffer.Slice(0, ClusterFrameHeader.HeaderSize), cancellationToken).ConfigureAwait(false);
-        if (received < ClusterFrameHeader.HeaderSize)
+        int received = await ReadExactAsync(socket, targetBuffer.Slice(0, CombinedHeaderSize), cancellationToken).ConfigureAwait(false);
+        if (received < CombinedHeaderSize)
         {
             return (default, default, 0);
         }
 
         var clusterHeader = MemoryMarshal.Read<ClusterFrameHeader>(targetBuffer.Span.Slice(0, ClusterFrameHeader.HeaderSize));
-        if (clusterHeader.Magic != ClusterFrameHeader.MagicConstant || clusterHeader.PayloadLength > (ulong)int.MaxValue)
-        {
-            return (clusterHeader, default, 0);
-        }
-
-        // Defensive framing: If not a result frame or payload too short for FusedActivationResultHeader,
-        // safely drain any payload bytes using targetBuffer (if large enough) or ArrayPool<byte>.Shared
-        if (clusterHeader.MessageType != MsgResult || clusterHeader.PayloadLength < (ulong)FusedActivationResultHeader.HeaderSize)
-        {
-            if (!await DrainPayloadAsync(socket, targetBuffer, (int)clusterHeader.PayloadLength, cancellationToken).ConfigureAwait(false))
-            {
-                return (default, default, 0);
-            }
-
-            return (clusterHeader, default, 0);
-        }
-
-        if (targetBuffer.Length < CombinedHeaderSize)
-        {
-            return (default, default, 0);
-        }
-
-        int actHdrRead = await ReadExactAsync(socket, targetBuffer.Slice(ClusterFrameHeader.HeaderSize, FusedActivationResultHeader.HeaderSize), cancellationToken).ConfigureAwait(false);
-        if (actHdrRead < FusedActivationResultHeader.HeaderSize)
-        {
-            return (default, default, 0);
-        }
-
         var resultHeader = FusedActivationResultHeader.ReadFrom(targetBuffer.Span.Slice(ClusterFrameHeader.HeaderSize, FusedActivationResultHeader.HeaderSize));
         int payloadLen = (int)clusterHeader.PayloadLength - FusedActivationResultHeader.HeaderSize;
 
         if (payloadLen > 0)
         {
-            if (targetBuffer.Length < CombinedHeaderSize + payloadLen)
-            {
-                return (default, default, 0);
-            }
-
             int remaining = await ReadExactAsync(socket, targetBuffer.Slice(CombinedHeaderSize, payloadLen), cancellationToken).ConfigureAwait(false);
             if (remaining < payloadLen)
             {
@@ -504,79 +398,5 @@ public static class FusedSocketTransport
             total += r;
         }
         return total;
-    }
-
-    /// <summary>
-    /// Safely drains payload bytes of an unexpected or non-result frame to preserve socket framing alignment.
-    /// Uses targetBuffer if large enough to avoid pool rentals; otherwise uses ArrayPool{byte}.Shared.
-    /// Guaranteed 0 GC allocations.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool DrainPayload(Socket socket, Span<byte> targetBuffer, int payloadLength)
-    {
-        if (payloadLength <= 0) return true;
-
-        if (targetBuffer.Length - ClusterFrameHeader.HeaderSize >= payloadLength)
-        {
-            int drained = ReadExact(socket, targetBuffer.Slice(ClusterFrameHeader.HeaderSize, payloadLength));
-            return drained == payloadLength;
-        }
-
-        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Min(payloadLength, 65536));
-        try
-        {
-            int remaining = payloadLength;
-            while (remaining > 0)
-            {
-                int chunk = Math.Min(remaining, rented.Length);
-                int drained = ReadExact(socket, rented.AsSpan(0, chunk));
-                if (drained < chunk) return false;
-                remaining -= chunk;
-            }
-            return true;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-    }
-
-    /// <summary>
-    /// Asynchronously drains payload bytes of an unexpected or non-result frame to preserve socket framing alignment.
-    /// Uses targetBuffer if large enough to avoid pool rentals; otherwise uses ArrayPool{byte}.Shared.
-    /// Guaranteed 0 GC allocations.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static async ValueTask<bool> DrainPayloadAsync(
-        Socket socket,
-        Memory<byte> targetBuffer,
-        int payloadLength,
-        CancellationToken cancellationToken)
-    {
-        if (payloadLength <= 0) return true;
-
-        if (targetBuffer.Length - ClusterFrameHeader.HeaderSize >= payloadLength)
-        {
-            int drained = await ReadExactAsync(socket, targetBuffer.Slice(ClusterFrameHeader.HeaderSize, payloadLength), cancellationToken).ConfigureAwait(false);
-            return drained == payloadLength;
-        }
-
-        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Min(payloadLength, 65536));
-        try
-        {
-            int remaining = payloadLength;
-            while (remaining > 0)
-            {
-                int chunk = Math.Min(remaining, rented.Length);
-                int drained = await ReadExactAsync(socket, rented.AsMemory(0, chunk), cancellationToken).ConfigureAwait(false);
-                if (drained < chunk) return false;
-                remaining -= chunk;
-            }
-            return true;
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
     }
 }
