@@ -63,6 +63,27 @@ public static class ModelDownloader
             "https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf",
             8988110240L,
             "Qwen2.5-14B-Instruct (Dense high-speed, 48 layers) @ Q4_K_M (8.37 GB)"
+        ),
+        ["qwen3.8-flash-next-coder"] = new(
+            "qwen3.8-flash-next-coder",
+            "Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ3_S.gguf",
+            "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF/resolve/main/Qwen3.8-Flash-Next-GSQ-RCO-Coder-IQ3_S.gguf",
+            19542212608L,
+            "Qwen3.8-Flash-Next-GSQ-RCO-Coder (42B RCO-pruned 256 experts, Hybrid GDN+MoE, IQ3_S/IQ4_NL) (18.20 GB)"
+        ),
+        ["qwen3.8-flash-next-q2_0"] = new(
+            "qwen3.8-flash-next-q2_0",
+            "Qwen3.8-Flash-Next-GSQ-RCO-Q2_0.gguf",
+            "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0.gguf",
+            22871023616L,
+            "Qwen3.8-Flash-Next-GSQ-RCO (80B total, 512 experts, Hybrid GDN+MoE, Fast Q2_0 lookup-free) (21.30 GB)"
+        ),
+        ["qwen3.8-flash-next-iq3_s"] = new(
+            "qwen3.8-flash-next-iq3_s",
+            "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S.gguf",
+            "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S.gguf",
+            31245905920L,
+            "Qwen3.8-Flash-Next-GSQ-RCO (80B total, 512 experts, Hybrid GDN+MoE, IQ3_S/IQ4_NL) (29.10 GB)"
         )
     };
 
