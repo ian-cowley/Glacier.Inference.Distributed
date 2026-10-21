@@ -214,31 +214,52 @@ public static partial class Program
 
             if (!stream)
             {
-                var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
-                var resp = new
+                try
                 {
-                    id = completionId,
-                    @object = "chat.completion",
-                    created = createdTimestamp,
-                    model = modelName,
-                    choices = new[]
+                    var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
+                    var resp = new
                     {
-                        new
+                        id = completionId,
+                        @object = "chat.completion",
+                        created = createdTimestamp,
+                        model = modelName,
+                        choices = new[]
                         {
-                            index = 0,
-                            message = new { role = "assistant", content = result.Text },
-                            finish_reason = result.FinishReason
+                            new
+                            {
+                                index = 0,
+                                message = new { role = "assistant", content = result.Text },
+                                finish_reason = result.FinishReason
+                            }
+                        },
+                        usage = new
+                        {
+                            prompt_tokens = result.PromptTokens,
+                            completion_tokens = result.GeneratedTokens,
+                            total_tokens = result.PromptTokens + result.GeneratedTokens
                         }
-                    },
-                    usage = new
+                    };
+                    await ctx.Response.WriteAsJsonAsync(resp, ctx.RequestAborted);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] Non-streaming GenerateAsync failed: {ex}");
+                    Console.ResetColor();
+                    ctx.Response.StatusCode = 500;
+                    await ctx.Response.WriteAsJsonAsync(new
                     {
-                        prompt_tokens = result.PromptTokens,
-                        completion_tokens = result.GeneratedTokens,
-                        total_tokens = result.PromptTokens + result.GeneratedTokens
-                    }
-                };
-                await ctx.Response.WriteAsJsonAsync(resp, ctx.RequestAborted);
-                return;
+                        error = new
+                        {
+                            message = ex.Message,
+                            type = "cluster_generation_error",
+                            param = (string?)null,
+                            code = 500
+                        }
+                    }, ctx.RequestAborted);
+                    return;
+                }
             }
 
             // Streaming SSE response
@@ -261,6 +282,13 @@ public static partial class Program
                         options,
                         onToken: token => channel.Writer.TryWrite(token),
                         ct: ctx.RequestAborted);
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] Streaming GenerateAsync failed: {ex}");
+                    Console.ResetColor();
+                    throw;
                 }
                 finally
                 {
@@ -311,7 +339,39 @@ public static partial class Program
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
             }
 
-            var genResult = await genTask;
+            ClusterGenerationResult genResult;
+            try
+            {
+                genResult = await genTask;
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Serve:Error] Generator task faulted: {ex}");
+                Console.ResetColor();
+
+                var errChunk = new
+                {
+                    id = completionId,
+                    @object = "chat.completion.chunk",
+                    created = createdTimestamp,
+                    model = modelName,
+                    choices = new[]
+                    {
+                        new
+                        {
+                            index = 0,
+                            delta = new { content = $"\n\n[Cluster Generation Error: {ex.Message}]" },
+                            finish_reason = "error"
+                        }
+                    }
+                };
+                await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(errChunk)}\n\n", ctx.RequestAborted);
+                await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
+                await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                return;
+            }
+
             var finalChunk = new
             {
                 id = completionId,

@@ -100,11 +100,11 @@ public record NodeResourceProfile
             else
             {
                 // Integrated UMA (e.g. Radeon 890M / 680M): uses system RAM.
-                // Leave 8GB for OS + system processes.
-                ulong osHeadroom = 8UL * 1024 * 1024 * 1024;
-                ulong usableShared = SharedMemoryBytes > osHeadroom ? (SharedMemoryBytes - osHeadroom) : 0;
-                int maxFit = (int)(usableShared / bytesPerLayer);
-                return Math.Clamp(maxFit, 0, Math.Min(16, totalModelLayers));
+                // Permit up to 75% allocation of total physical host RAM for layer weights.
+                ulong hostRam = SharedMemoryBytes > 0 ? SharedMemoryBytes : ClusterResourcePlanner.GetPhysicalHostRamBytes();
+                ulong usableUma = (ulong)(hostRam * 0.75);
+                int maxFit = (int)(usableUma / bytesPerLayer);
+                return Math.Clamp(maxFit, 0, totalModelLayers);
             }
         }
         else
@@ -404,7 +404,10 @@ public static class ClusterResourcePlanner
         allCandidates.AddRange(localNodes);
         allCandidates.AddRange(remoteCandidates);
 
-        ulong bytesPerLayer = totalModelBytes / (ulong)Math.Max(1, totalLayers);
+        // Transformer hidden layers account for approximately 55-60% of total GGUF parameter bytes
+        // (the remainder consists of vocabulary embedding table token_embd.weight, LM Head output.weight, and norms).
+        ulong layerWeightsTotal = (ulong)(totalModelBytes * 0.55);
+        ulong bytesPerLayer = Math.Max(50_000_000UL, layerWeightsTotal / (ulong)Math.Max(1, totalLayers));
 
         // 1. Calculate Priority Scores and Comfortable Capacities for all candidate devices
         foreach (var c in allCandidates)
@@ -427,17 +430,38 @@ public static class ClusterResourcePlanner
 
         int[] layerCounts = new int[allCandidates.Count];
 
-        // 2. Explicit user override (e.g. --layers 8,9,11 or --layers 7,7,7,7)
+        // 2. Explicit user override (e.g. --layers 8,9,11 or --layers 27:21)
         if (!string.IsNullOrWhiteSpace(layerAllocArg) && !layerAllocArg.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"\n[AutoCompute Planner] Using explicit layer distribution: {layerAllocArg}");
             var parts = layerAllocArg.Split(new[] { ',', ':', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            // If fewer stages are specified than candidate devices (e.g. "27:21" across Host dGPU + Host iGPU + Remote dGPU),
+            // select the top N highest-priority devices (preferring discrete GPUs over integrated GPUs) and preserve pipeline order.
+            List<int> targetIndices;
+            if (parts.Length < allCandidates.Count)
+            {
+                targetIndices = allCandidates
+                    .Select((node, idx) => (node, idx))
+                    .OrderByDescending(x => x.node.IsGpu && (x.node.VramBytes >= 2_000_000_000UL || x.node.SharedMemoryBytes >= 8_000_000_000UL) ? 1 : 0)
+                    .ThenByDescending(x => x.node.PriorityScore)
+                    .Take(parts.Length)
+                    .Select(x => x.idx)
+                    .OrderBy(idx => allCandidates[idx].IsLocal ? 0 : 1)
+                    .ThenBy(idx => idx)
+                    .ToList();
+            }
+            else
+            {
+                targetIndices = Enumerable.Range(0, allCandidates.Count).ToList();
+            }
+
             int assigned = 0;
-            for (int i = 0; i < allCandidates.Count && i < parts.Length; i++)
+            for (int i = 0; i < targetIndices.Count && i < parts.Length; i++)
             {
                 if (int.TryParse(parts[i], out int count))
                 {
-                    layerCounts[i] = count;
+                    layerCounts[targetIndices[i]] = count;
                     assigned += count;
                 }
             }
@@ -456,50 +480,52 @@ public static class ClusterResourcePlanner
         }
         else
         {
-            // 3. Dynamic Priority & Capacity Water-Filling Engine:
-            // High-priority "monster GPUs" (5090 / 4090 / server GPUs) are ranked at the top
-            // and receive as many layers as comfortably fit in physical VRAM first.
-            var prioritized = allCandidates
-                .Select((node, index) => (node, index))
-                .OrderByDescending(x => x.node.PriorityScore)
-                .ToList();
-
-            int remaining = totalLayers;
-
-            // Greedily fill devices in order of PriorityScore up to their comfortable in-memory capacity
-            foreach (var (node, originalIdx) in prioritized)
+            // 3. Dynamic Heterogeneous Load Balancer with Pareto Stage-Time Balancing:
+            // Convert discovered candidate profiles into StageDeviceProfiles
+            var candidateProfiles = allCandidates.Select(c => new Glacier.Inference.Distributed.Pipeline.StageDeviceProfile
             {
-                if (remaining <= 0) break;
-                int alloc = Math.Min(node.MaxLayersCapacity, remaining);
-                layerCounts[originalIdx] = alloc;
-                remaining -= alloc;
-            }
+                DeviceId = c.Name,
+                DeviceName = c.DeviceName,
+                ComputeMsPerLayer = Math.Max(0.1, c.EstimatedMsPerLayer),
+                MaxLayersCapacity = c.MaxLayersCapacity,
+                IsLocal = c.IsLocal,
+                NetworkHopLatencyMs = c.IsLocal ? 0.0 : 0.6
+            }).ToList();
 
-            // Fallback: If model is colossal (e.g. 100B+ MoE) and exceeds all comfortable GPU VRAM caps,
-            // spill remaining layers across available system RAM / CPU nodes.
-            if (remaining > 0)
+            var lbOptions = new Glacier.Inference.Distributed.Pipeline.HeterogeneousLoadBalancerOptions
             {
-                for (int i = 0; i < allCandidates.Count && remaining > 0; i++)
-                {
-                    layerCounts[i] += 1;
-                    remaining -= 1;
-                }
+                EnableAutomaticPruning = true,
+                MinLayersThreshold = 2.0,
+                MaxCyclePenaltyThresholdMs = 2.5,
+                DefaultLmHeadMs = 6.8,
+                DefaultEmbedMs = 0.0
+            };
+
+            var lbResult = Glacier.Inference.Distributed.Pipeline.HeterogeneousLoadBalancer.BalanceLayers(totalLayers, candidateProfiles, lbOptions);
+            Console.WriteLine(lbResult.DiagnosticSummary);
+
+            // Map balanced stage allocations back to layerCounts array
+            for (int i = 0; i < allCandidates.Count; i++)
+            {
+                var matchingStage = lbResult.ActiveStages.FirstOrDefault(s => s.Device.DeviceId == allCandidates[i].Name);
+                layerCounts[i] = matchingStage?.LayerCount ?? 0;
             }
 
             Console.WriteLine($"\n[AutoCompute Planner] Optimal Fleet Partitioning Solved for {totalLayers} Layers:");
             for (int i = 0; i < allCandidates.Count; i++)
             {
-                var c = allCandidates[i];
-                if (layerCounts[i] == 0)
+                var node = allCandidates[i];
+                int count = layerCounts[i];
+                if (count > 0)
                 {
-                    string reason = !c.IsGpu
-                        ? "CPU node kept in reserve"
-                        : "Pruned (higher priority GPU capacity was sufficient to hold the model)";
-                    Console.WriteLine($"  -> Pruning device '{c.Name}' ({c.Host}): {reason}.");
+                    string gpuInfo = node.IsGpu
+                        ? $"{node.DeviceName} ({node.VramBytes / (1024 * 1024 * 1024)}GB VRAM)"
+                        : "CPU SIMD";
+                    Console.WriteLine($"  Stage {i}: {node.Name,-22} | {gpuInfo,-35} | {count,2} layers ({node.EstimatedMsPerLayer:F1}ms/L, priority {node.PriorityScore:F1})");
                 }
                 else
                 {
-                    Console.WriteLine($"  -> Allocated {layerCounts[i],2} layers to '{c.Name}' (Priority {c.PriorityScore:F1}, Capacity {c.MaxLayersCapacity}L)");
+                    Console.WriteLine($"  Pruned:  {node.Name,-22} | {node.DeviceName,-35} |  0 layers (bypassed for maximum cluster throughput)");
                 }
             }
         }
@@ -549,5 +575,120 @@ public static class ClusterResourcePlanner
         }
 
         return activeStages;
+    }
+
+    /// <summary>
+    /// Re-orders pipeline stages so that GPUs execute first and the highest-bandwidth / largest-VRAM GPU
+    /// is assigned to the final stage (<c>IsLastStage = true</c>), where the full-vocabulary LM Head
+    /// (<c>output.weight</c>, 151,936+ rows) and speculative verification reside.
+    /// </summary>
+    public static List<StageAllocation> OptimizeFinalStageGpuOrder(IReadOnlyList<StageAllocation> stages)
+    {
+        if (stages == null || stages.Count <= 1)
+            return stages?.ToList() ?? [];
+
+        var clone = stages.Select(s => s with { }).ToList();
+
+        // Find the strongest GPU (highest PriorityScore among GPU stages)
+        int strongestGpuIdx = -1;
+        double bestScore = double.NegativeInfinity;
+        for (int i = 0; i < clone.Count; i++)
+        {
+            if (clone[i].Node.IsGpu && clone[i].Node.PriorityScore > bestScore)
+            {
+                bestScore = clone[i].Node.PriorityScore;
+                strongestGpuIdx = i;
+            }
+        }
+
+        var reorderedNodes = new List<(NodeResourceProfile Node, int LayerCount)>(clone.Count);
+        for (int i = 0; i < clone.Count; i++)
+        {
+            if (i != strongestGpuIdx)
+                reorderedNodes.Add((clone[i].Node, clone[i].LayerCount));
+        }
+        if (strongestGpuIdx >= 0)
+        {
+            reorderedNodes.Add((clone[strongestGpuIdx].Node, clone[strongestGpuIdx].LayerCount));
+        }
+
+        var result = new List<StageAllocation>(reorderedNodes.Count);
+        int curLayer = 0;
+        for (int i = 0; i < reorderedNodes.Count; i++)
+        {
+            var (node, count) = reorderedNodes[i];
+            result.Add(new StageAllocation
+            {
+                Node = node,
+                StageIndex = i,
+                StartLayer = curLayer,
+                EndLayer = curLayer + count - 1,
+                IsLastStage = i == reorderedNodes.Count - 1
+            });
+            curLayer += count;
+        }
+
+        return result;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    /// <summary>
+    /// Queries genuine physical host RAM in bytes across Windows, Linux, and other platforms.
+    /// Used to allocate up to 75% of physical memory to UMA integrated GPU compute buffers.
+    /// </summary>
+    public static ulong GetPhysicalHostRamBytes()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var memStatus = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+                if (GlobalMemoryStatusEx(ref memStatus) && memStatus.ullTotalPhys > 0)
+                {
+                    return memStatus.ullTotalPhys;
+                }
+            }
+            else if (OperatingSystem.IsLinux() && File.Exists("/proc/meminfo"))
+            {
+                foreach (var line in File.ReadLines("/proc/meminfo"))
+                {
+                    if (line.StartsWith("MemTotal:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 2 && ulong.TryParse(parts[1], out ulong kb))
+                        {
+                            return kb * 1024UL;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore and fall back to GC memory info
+        }
+
+        ulong gcTotal = (ulong)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        if (gcTotal > 0) return gcTotal;
+
+        // Universal fallback: 32 GB
+        return 32UL * 1024 * 1024 * 1024;
     }
 }
