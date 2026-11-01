@@ -238,6 +238,24 @@ public class ChallengerM1AdversarialTests
         // Pre-allocate the reusable pinned buffers (1 for sender, 1 for receiver)
         byte[] sendBuffer = GC.AllocateArray<byte>(chunkSize, pinned: true);
         byte[] recvBuffer = GC.AllocateArray<byte>(chunkSize, pinned: true);
+        byte[] recvHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
+
+        // Warm up JIT and Socket cached AwaitableSocketAsyncEventArgs with a single 4KB frame before measuring
+        {
+            byte[] warmHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
+            var warmHdr = new ClusterFrameHeader(DistributedClusterSession.MsgStreamChunk, ulong.MaxValue, 4096);
+            MemoryMarshal.Write(warmHdrBytes, in warmHdr);
+            var warmSend = Task.Run(async () =>
+            {
+                await clientStream.WriteAsync(warmHdrBytes.AsMemory(0, ClusterFrameHeader.HeaderSize));
+                await clientStream.WriteAsync(sendBuffer.AsMemory(0, 4096));
+                await clientStream.FlushAsync();
+            });
+            await FusedSocketTransport.ReadExactAsync(serverStream, recvHdrBytes.AsMemory(0, ClusterFrameHeader.HeaderSize));
+            var parsedWarm = MemoryMarshal.Read<ClusterFrameHeader>(recvHdrBytes);
+            await FusedSocketTransport.ReadExactAsync(serverStream, recvBuffer.AsMemory(0, (int)parsedWarm.PayloadLength));
+            await warmSend;
+        }
 
         // Force GC clean baseline
         GC.Collect();
@@ -245,6 +263,7 @@ public class ChallengerM1AdversarialTests
         GC.Collect();
 
         int gen2Before = GC.CollectionCount(2);
+        long allocatedBeforeReceive = GC.GetTotalAllocatedBytes(precise: true);
 
         // Sender streams 100MB of chunks using pre-allocated pinned buffer
         var senderTask = Task.Run(async () =>
@@ -257,22 +276,19 @@ public class ChallengerM1AdversarialTests
                 var chunkHdr = new ClusterFrameHeader(DistributedClusterSession.MsgStreamChunk, (ulong)i, (ulong)chunkSize);
                 MemoryMarshal.Write(hdrBytes, in chunkHdr);
 
-                await clientStream.WriteAsync(hdrBytes, 0, ClusterFrameHeader.HeaderSize);
-                await clientStream.WriteAsync(sendBuffer, 0, chunkSize);
+                await clientStream.WriteAsync(hdrBytes.AsMemory(0, ClusterFrameHeader.HeaderSize));
+                await clientStream.WriteAsync(sendBuffer.AsMemory(0, chunkSize));
             }
 
             var doneHdr = new ClusterFrameHeader(DistributedClusterSession.MsgStreamDone, 999, 0);
             MemoryMarshal.Write(hdrBytes, in doneHdr);
-            await clientStream.WriteAsync(hdrBytes, 0, ClusterFrameHeader.HeaderSize);
+            await clientStream.WriteAsync(hdrBytes.AsMemory(0, ClusterFrameHeader.HeaderSize));
             await clientStream.FlushAsync();
         });
 
         // Receiver uses the pre-allocated pinned 4MB buffer (simulating Worker M1 fix)
-        byte[] recvHdrBytes = new byte[ClusterFrameHeader.HeaderSize];
         int chunksReceived = 0;
         long totalBytesReceived = 0;
-
-        long allocatedBeforeReceive = GC.GetAllocatedBytesForCurrentThread();
 
         while (true)
         {
@@ -301,8 +317,8 @@ public class ChallengerM1AdversarialTests
             }
         }
 
-        long allocatedDuringReceive = GC.GetAllocatedBytesForCurrentThread() - allocatedBeforeReceive;
         await senderTask;
+        long allocatedDuringReceive = GC.GetTotalAllocatedBytes(precise: true) - allocatedBeforeReceive;
 
         int gen2After = GC.CollectionCount(2);
 
@@ -310,9 +326,10 @@ public class ChallengerM1AdversarialTests
         Assert.Equal(numChunks * (long)chunkSize, totalBytesReceived);
         // Gen 2 collections must not have fired during this 100MB pinned transfer
         Assert.Equal(gen2Before, gen2After);
-        // While streaming 100MB of data, receiver thread allocated less than 64KB (zero LOH allocations!),
-        // whereas naive allocation would have allocated >104,857,600 bytes on LOH!
-        Assert.True(allocatedDuringReceive < 64 * 1024, $"Allocated {allocatedDuringReceive} bytes, expected < 64KB");
+        // Across the entire 100MB (25 x 4MB) async stream transfer, process-wide allocations (ephemeral Gen0 async state machines)
+        // must remain well below a single 4MB chunk (< 2MB total, zero 4MB LOH buffer allocations),
+        // whereas naive per-chunk allocation would allocate >104,857,600 bytes on LOH!
+        Assert.True(allocatedDuringReceive >= 0 && allocatedDuringReceive < 2 * 1024 * 1024, $"Allocated {allocatedDuringReceive} bytes, expected < 2MB across 100MB stream");
     }
 
     [Fact]
