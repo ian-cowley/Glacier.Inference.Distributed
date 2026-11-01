@@ -509,7 +509,7 @@ public class Milestone2AdversarialStressTests
         using var arena = new PinnedBatchBufferArena(maxBatchTokens: maxBatch, hiddenDim: dim, vocabSize: vocab);
 
         int expectedFloats = maxBatch * dim; // 10,485,760
-        int expectedPayloadBytes = 64 + (expectedFloats * sizeof(float)); // 41,943,104
+        int expectedPayloadBytes = 64 + (expectedFloats * sizeof(float)) + PinnedBatchBufferArena.MaxSamplingTrailerBytes;
 
         Assert.Equal(expectedFloats, arena.MaxTotalFloats);
         Assert.Equal(expectedPayloadBytes, arena.MaxBytePayload);

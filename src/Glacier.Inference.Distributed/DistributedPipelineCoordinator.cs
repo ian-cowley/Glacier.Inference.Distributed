@@ -1,3 +1,5 @@
+#pragma warning disable GLACIER_EXP001
+
 namespace Glacier.Inference.Distributed;
 
 using System;

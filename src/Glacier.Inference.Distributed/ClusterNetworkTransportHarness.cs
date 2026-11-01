@@ -45,29 +45,109 @@ public sealed class ClusterNetworkTransportHarness
     }
 
     /// <summary>
-    /// Validates that target host is strictly within allowed local network bounds (127.0.0.1 or 192.168.1.0/24).
-    /// Prevents external or unauthorized socket connections.
+    /// Validates that target host is strictly within allowed local, private LAN, link-local, or Tailscale/CGNAT mesh bounds:
+    /// loopback (<c>127.0.0.0/8</c>, <c>::1</c>, <c>localhost</c>), RFC 1918 (<c>10.0.0.0/8</c>, <c>172.16.0.0/12</c>, <c>192.168.0.0/16</c>),
+    /// link-local (<c>169.254.0.0/16</c>, <c>fe80::/10</c>), CGNAT/Tailscale (<c>100.64.0.0/10</c>), and IPv6 ULA (<c>fc00::/7</c>).
+    /// Rejects public internet IPs, unspecified/broadcast addresses, and arbitrary DNS hostnames.
     /// </summary>
     public static bool IsSubnetAllowed(string host)
     {
-        if (string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        string trimmed = host.Trim();
+        if (string.Equals(trimmed, "localhost", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
 
-        if (IPAddress.TryParse(host, out var ip))
+        // Strip IPv6 zone index (e.g. fe80::1%eth0) before parsing if present
+        string parseTarget = trimmed;
+        int zoneIdx = parseTarget.IndexOf('%');
+        if (zoneIdx > 0 && parseTarget.Contains(':'))
+        {
+            parseTarget = parseTarget.Substring(0, zoneIdx);
+        }
+
+        if (!IPAddress.TryParse(parseTarget, out var ip))
+        {
+            return false;
+        }
+
+        if (ip.IsIPv4MappedToIPv6)
+        {
+            ip = ip.MapToIPv4();
+        }
+
+        if (ip.AddressFamily == AddressFamily.InterNetwork)
+        {
+            // Reject non-canonical shorthand IPv4 strings (e.g. "192.168.1" or "127.1") unless originally IPv4-mapped IPv6
+            if (!parseTarget.Contains(':') && CountChar(parseTarget, '.') != 3)
+            {
+                return false;
+            }
+
+            Span<byte> b = stackalloc byte[4];
+            if (!ip.TryWriteBytes(b, out _)) return false;
+
+            // Reject 0.0.0.0 and 255.255.255.255
+            if ((b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0) ||
+                (b[0] == 255 && b[1] == 255 && b[2] == 255 && b[3] == 255))
+            {
+                return false;
+            }
+
+            // Loopback: 127.0.0.0/8
+            if (b[0] == 127) return true;
+
+            // RFC 1918: 10.0.0.0/8
+            if (b[0] == 10) return true;
+
+            // RFC 1918: 172.16.0.0/12 (172.16.x.x .. 172.31.x.x)
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+
+            // RFC 1918: 192.168.0.0/16
+            if (b[0] == 192 && b[1] == 168) return true;
+
+            // Link-local: 169.254.0.0/16
+            if (b[0] == 169 && b[1] == 254) return true;
+
+            // CGNAT / Tailscale mesh: 100.64.0.0/10 (100.64.x.x .. 100.127.x.x)
+            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true;
+
+            return false;
+        }
+
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
         {
             if (IPAddress.IsLoopback(ip)) return true;
+            if (ip.Equals(IPAddress.IPv6Any) || ip.Equals(IPAddress.IPv6None)) return false;
 
-            var bytes = ip.GetAddressBytes();
-            if (bytes.Length == 4 && bytes[0] == 192 && bytes[1] == 168 && bytes[2] == 1)
-            {
-                return true;
-            }
+            Span<byte> b6 = stackalloc byte[16];
+            if (!ip.TryWriteBytes(b6, out _)) return false;
+
+            // Link-local: fe80::/10 (1111 1110 10xx xxxx -> b6[0] == 0xFE && (b6[1] & 0xC0) == 0x80)
+            if (b6[0] == 0xFE && (b6[1] & 0xC0) == 0x80) return true;
+
+            // Unique Local Address (ULA): fc00::/7 (fc00:: .. fdff:: -> (b6[0] & 0xFE) == 0xFC)
+            if ((b6[0] & 0xFE) == 0xFC) return true;
+
+            return false;
         }
 
         return false;
+    }
+
+    private static int CountChar(string value, char target)
+    {
+        int count = 0;
+        for (int i = 0; i < value.Length; i++)
+        {
+            if (value[i] == target) count++;
+        }
+        return count;
     }
 
     /// <summary>
@@ -77,7 +157,8 @@ public sealed class ClusterNetworkTransportHarness
     {
         if (!IsSubnetAllowed(host))
         {
-            throw new SecurityException($"Target host '{host}' violates local subnet confinement (strictly restricted to loopback and 192.168.1.0/24).");
+            throw new SecurityException(
+                $"Target host '{host}' violates local/private subnet confinement (restricted to loopback, RFC 1918, link-local, CGNAT/Tailscale 100.64.0.0/10, and IPv6 ULA/link-local).");
         }
     }
 
@@ -479,10 +560,12 @@ public sealed class ClusterNetworkTransportHarness
     /// </summary>
     public static double BenchmarkPipelineExecution(int hiddenDim = 4096, int ffnDim = 11008, int iterations = 100)
     {
-        using var stage0 = new AttentionRootStageWorker(hiddenDim, 2, 8, "Stage 0: Root Attention & Router");
+#pragma warning disable GLACIER_EXP001
+        using var stage0 = new AttentionRootStageWorker(hiddenDim, 2, 8, "Stage 0: RMSNorm Ingress");
         using var stage1 = CpuWarmExpertPoolWorker.CreateSynthetic(1, hiddenDim, ffnDim, 8, Gguf.GgufType.F32, "Stage 1: Warm Expert Pool (AVX-512)", multithreaded: false);
         using var stage2 = new AccumulatorStageWorker(hiddenDim, "Stage 2: Residual Accumulator");
         using var coordinator = new DistributedPipelineCoordinator(stage0, stage1, stage2, hiddenDim);
+#pragma warning restore GLACIER_EXP001
 
         byte[] inputBytes = new byte[hiddenDim * sizeof(float)];
         Array.Fill(inputBytes, (byte)1);

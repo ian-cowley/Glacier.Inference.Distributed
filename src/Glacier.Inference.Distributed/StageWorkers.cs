@@ -1,19 +1,19 @@
 namespace Glacier.Inference.Distributed;
 
 using System;
-using System.Buffers;
-using System.Numerics;
+using System.Diagnostics.CodeAnalysis;
+using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
 using System.Threading;
 using System.Threading.Tasks;
 using Glacier.Cluster.Shuffle;
 
 /// <summary>
-/// Stage 0 worker: executes ingress token normalization, root attention, and expert router gating.
-/// Emits activation vectors with assigned expert routing metadata.
+/// Stage 0 synthetic RMSNorm ingress stage worker for 3-stage MoE shuffle micro-pipelines.
+/// Note: Executes vectorized RMSNorm ingress normalization only (full self-attention and learned router
+/// gating are handled by <c>IClusterStageModel</c> / <c>IPipelineStage</c> in full model pipelines).
 /// </summary>
+[Experimental("GLACIER_EXP001")]
 public sealed unsafe class AttentionRootStageWorker : IInferenceStageWorker
 {
     private readonly int _dim;
@@ -23,16 +23,18 @@ public sealed unsafe class AttentionRootStageWorker : IInferenceStageWorker
 
     public int StageRank => 0;
     public string Name { get; }
+    public int TopK => _topK;
+    public int NumExperts => _numExperts;
 
     public AttentionRootStageWorker(
         int dim,
         int topK = 2,
         int numExperts = 8,
-        string name = "Stage 0: Root Attention & Router")
+        string name = "Stage 0: RMSNorm Ingress")
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dim);
         _dim = dim;
-        _topK = Math.Clamp(topK, 1, numExperts);
+        _topK = Math.Clamp(topK, 1, Math.Max(1, numExperts));
         _numExperts = numExperts;
         Name = name;
     }
@@ -69,7 +71,7 @@ public sealed unsafe class AttentionRootStageWorker : IInferenceStageWorker
     }
 
     /// <summary>
-    /// Processes RMSNorm activation directly into caller-provided unmanaged float buffers.
+    /// Processes vectorized RMSNorm activation directly into caller-provided unmanaged float buffers.
     /// Exactly zero GC heap allocations.
     /// </summary>
     public void ProcessActivation(
@@ -81,29 +83,12 @@ public sealed unsafe class AttentionRootStageWorker : IInferenceStageWorker
         ArgumentNullException.ThrowIfNull(inputActivation);
         ArgumentNullException.ThrowIfNull(outputActivation);
 
-        // Apply RMSNorm: outX = x / sqrt(mean(x^2) + eps)
-        float sumSq = 0.0f;
-        for (int i = 0; i < _dim; i++)
-        {
-            sumSq += inputActivation[i] * inputActivation[i];
-        }
-        float rms = 1.0f / MathF.Sqrt((sumSq / _dim) + 1e-5f);
+        var inSpan = new ReadOnlySpan<float>(inputActivation, _dim);
+        var outSpan = new Span<float>(outputActivation, _dim);
 
-        int iNorm = 0;
-        if (Vector256.IsHardwareAccelerated)
-        {
-            int vLen = Vector256<float>.Count;
-            var vRms = Vector256.Create(rms);
-            for (; iNorm <= _dim - vLen; iNorm += vLen)
-            {
-                var vx = Vector256.Load(inputActivation + iNorm);
-                (vx * vRms).Store(outputActivation + iNorm);
-            }
-        }
-        for (; iNorm < _dim; iNorm++)
-        {
-            outputActivation[iNorm] = inputActivation[iNorm] * rms;
-        }
+        float sumSq = TensorPrimitives.SumOfSquares(inSpan);
+        float rms = 1.0f / MathF.Sqrt((sumSq / _dim) + 1e-5f);
+        TensorPrimitives.Multiply(inSpan, rms, outSpan);
     }
 
     public void Dispose()
@@ -113,8 +98,8 @@ public sealed unsafe class AttentionRootStageWorker : IInferenceStageWorker
 }
 
 /// <summary>
-/// Stage 2 worker: accumulates weighted expert outputs and merges with residual connection.
-/// Implements zero-allocation SIMD FMA accumulation.
+/// Stage 2 worker: accumulates weighted expert outputs and merges with residual connection
+/// via hardware-accelerated <see cref="TensorPrimitives"/> SIMD kernels.
 /// </summary>
 public sealed unsafe class AccumulatorStageWorker : IInferenceStageWorker
 {
@@ -160,8 +145,8 @@ public sealed unsafe class AccumulatorStageWorker : IInferenceStageWorker
     }
 
     /// <summary>
-    /// Accumulates expert output into an existing accumulation buffer with SIMD weighting.
-    /// y = y + weight * expertOutput
+    /// Accumulates expert output into an existing accumulation buffer with SIMD FMA weighting:
+    /// <c>accumulator = accumulator + weight * expertOutput</c>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void AccumulateWeightedExpert(
@@ -169,47 +154,22 @@ public sealed unsafe class AccumulatorStageWorker : IInferenceStageWorker
         float* expertOutput,
         float weight)
     {
-        int i = 0;
-        if (Vector256.IsHardwareAccelerated)
-        {
-            int vLen = Vector256<float>.Count;
-            var vWeight = Vector256.Create(weight);
-            for (; i <= _dim - vLen; i += vLen)
-            {
-                var vAcc = Vector256.Load(accumulator + i);
-                var vExp = Vector256.Load(expertOutput + i);
-                (vAcc + (vExp * vWeight)).Store(accumulator + i);
-            }
-        }
-        for (; i < _dim; i++)
-        {
-            accumulator[i] += weight * expertOutput[i];
-        }
+        var accSpan = new Span<float>(accumulator, _dim);
+        var expSpan = new ReadOnlySpan<float>(expertOutput, _dim);
+        TensorPrimitives.MultiplyAdd(expSpan, weight, accSpan, accSpan);
     }
 
     /// <summary>
-    /// Adds residual vector into accumulator: y = y + residual.
+    /// Adds residual vector into accumulator: <c>accumulator = accumulator + residual</c>.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void AddResidual(
         float* accumulator,
         float* residual)
     {
-        int i = 0;
-        if (Vector256.IsHardwareAccelerated)
-        {
-            int vLen = Vector256<float>.Count;
-            for (; i <= _dim - vLen; i += vLen)
-            {
-                var vAcc = Vector256.Load(accumulator + i);
-                var vRes = Vector256.Load(residual + i);
-                (vAcc + vRes).Store(accumulator + i);
-            }
-        }
-        for (; i < _dim; i++)
-        {
-            accumulator[i] += residual[i];
-        }
+        var accSpan = new Span<float>(accumulator, _dim);
+        var resSpan = new ReadOnlySpan<float>(residual, _dim);
+        TensorPrimitives.Add(accSpan, resSpan, accSpan);
     }
 
     public void Dispose()

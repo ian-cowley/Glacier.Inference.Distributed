@@ -9,12 +9,20 @@ publish/
 publish_linux/
 publish_win/
 nuget-local/
+packages/
 artifacts/
+*.nupkg
+*.snupkg
 
-# IDE and Editor files
+# Model weights and slices
+models/
+*.gguf
+
+# IDE, Agent, and Editor files
 .vs/
 .idea/
 .vscode/
+.gemini/
 *.user
 *.suo
 *.userosscache
@@ -22,9 +30,11 @@ artifacts/
 
 # Secrets & Environment variables (Zero Secrets Policy)
 *.env
-*.env.*
-appsettings.json
-appsettings.*.json
+*.env*
+*.key
+*.pem
+secrets*.json
+appsettings*.json
 !appsettings.template.json
 
 # Scratch and temporary testing files

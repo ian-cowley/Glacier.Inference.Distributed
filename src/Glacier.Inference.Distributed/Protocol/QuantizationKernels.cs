@@ -3,6 +3,7 @@ namespace Glacier.Inference.Distributed;
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -182,22 +183,20 @@ public static class QuantizationKernels
 
     public static float PackFp16(ReadOnlySpan<float> input, Span<byte> destination)
     {
-        var destHalf = MemoryMarshal.Cast<byte, Half>(destination);
-        int count = input.Length;
-        for (int i = 0; i < count; i++)
+        if (!input.IsEmpty)
         {
-            destHalf[i] = (Half)input[i];
+            var destHalf = MemoryMarshal.Cast<byte, Half>(destination).Slice(0, input.Length);
+            TensorPrimitives.ConvertToHalf(input, destHalf);
         }
         return 1.0f;
     }
 
     public static void UnpackFp16(ReadOnlySpan<byte> source, Span<float> destination)
     {
-        var srcHalf = MemoryMarshal.Cast<byte, Half>(source);
-        int count = destination.Length;
-        for (int i = 0; i < count; i++)
+        if (!destination.IsEmpty)
         {
-            destination[i] = (float)srcHalf[i];
+            var srcHalf = MemoryMarshal.Cast<byte, Half>(source).Slice(0, destination.Length);
+            TensorPrimitives.ConvertToSingle(srcHalf, destination);
         }
     }
 
@@ -212,81 +211,8 @@ public static class QuantizationKernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float FindMaxAbsolute(ReadOnlySpan<float> input)
     {
-        float maxVal = 0.0f;
-        int i = 0;
-        int len = input.Length;
-
-        if (Vector256.IsHardwareAccelerated && len >= 64)
-        {
-            var vMax0 = Vector256<float>.Zero;
-            var vMax1 = Vector256<float>.Zero;
-            var vMax2 = Vector256<float>.Zero;
-            var vMax3 = Vector256<float>.Zero;
-            var vMax4 = Vector256<float>.Zero;
-            var vMax5 = Vector256<float>.Zero;
-            var vMax6 = Vector256<float>.Zero;
-            var vMax7 = Vector256<float>.Zero;
-            ref float rIn = ref MemoryMarshal.GetReference(input);
-            int limit = len - 64;
-            for (; i <= limit; i += 64)
-            {
-                var v0 = Vector256.LoadUnsafe(ref rIn, (nuint)i);
-                var v1 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 8));
-                var v2 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 16));
-                var v3 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 24));
-                var v4 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 32));
-                var v5 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 40));
-                var v6 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 48));
-                var v7 = Vector256.LoadUnsafe(ref rIn, (nuint)(i + 56));
-
-                vMax0 = Vector256.Max(vMax0, Vector256.Abs(v0));
-                vMax1 = Vector256.Max(vMax1, Vector256.Abs(v1));
-                vMax2 = Vector256.Max(vMax2, Vector256.Abs(v2));
-                vMax3 = Vector256.Max(vMax3, Vector256.Abs(v3));
-                vMax4 = Vector256.Max(vMax4, Vector256.Abs(v4));
-                vMax5 = Vector256.Max(vMax5, Vector256.Abs(v5));
-                vMax6 = Vector256.Max(vMax6, Vector256.Abs(v6));
-                vMax7 = Vector256.Max(vMax7, Vector256.Abs(v7));
-            }
-            var m01 = Vector256.Max(vMax0, vMax1);
-            var m23 = Vector256.Max(vMax2, vMax3);
-            var m45 = Vector256.Max(vMax4, vMax5);
-            var m67 = Vector256.Max(vMax6, vMax7);
-            var vMax = Vector256.Max(Vector256.Max(m01, m23), Vector256.Max(m45, m67));
-            var v128 = Vector128.Max(vMax.GetLower(), vMax.GetUpper());
-            float m0 = MathF.Max(v128[0], v128[1]);
-            float m1 = MathF.Max(v128[2], v128[3]);
-            maxVal = MathF.Max(m0, m1);
-        }
-        else if (Vector128.IsHardwareAccelerated && len >= 16)
-        {
-            var vMax0 = Vector128<float>.Zero;
-            var vMax1 = Vector128<float>.Zero;
-            var vSignMask = Vector128.Create(0x7fffffff).AsSingle();
-            ref float rIn = ref MemoryMarshal.GetReference(input);
-            int limit = len - 16;
-            for (; i <= limit; i += 16)
-            {
-                var v0 = Vector128.LoadUnsafe(ref rIn, (nuint)i);
-                var v1 = Vector128.LoadUnsafe(ref rIn, (nuint)(i + 4));
-                var v2 = Vector128.LoadUnsafe(ref rIn, (nuint)(i + 8));
-                var v3 = Vector128.LoadUnsafe(ref rIn, (nuint)(i + 12));
-                vMax0 = Vector128.Max(vMax0, Vector128.Max(Vector128.BitwiseAnd(v0, vSignMask), Vector128.BitwiseAnd(v1, vSignMask)));
-                vMax1 = Vector128.Max(vMax1, Vector128.Max(Vector128.BitwiseAnd(v2, vSignMask), Vector128.BitwiseAnd(v3, vSignMask)));
-            }
-            var vMax = Vector128.Max(vMax0, vMax1);
-            float m0 = MathF.Max(vMax[0], vMax[1]);
-            float m1 = MathF.Max(vMax[2], vMax[3]);
-            maxVal = MathF.Max(m0, m1);
-        }
-
-        for (; i < len; i++)
-        {
-            float a = MathF.Abs(input[i]);
-            if (a > maxVal) maxVal = a;
-        }
-
-        return maxVal;
+        if (input.IsEmpty) return 0.0f;
+        return MathF.Abs(TensorPrimitives.MaxMagnitude(input));
     }
 
     /// <summary>
@@ -317,14 +243,19 @@ public static class QuantizationKernels
 
         float maxAbs = FindMaxAbsolute(input);
 
-        if (maxAbs < 1e-10f || float.IsNaN(maxAbs) || float.IsInfinity(maxAbs))
+        if (!float.IsFinite(maxAbs) || maxAbs < 1e-10f)
         {
             output.Clear();
             return 1.0f;
         }
 
         float scale = maxAbs / 127.0f;
-        float invScale = 1.0f / scale;
+        float invScale = 127.0f / maxAbs;
+        if (!float.IsFinite(scale) || !float.IsFinite(invScale) || scale <= 0.0f)
+        {
+            output.Clear();
+            return 1.0f;
+        }
 
         int count = input.Length;
         int i = 0;
@@ -447,10 +378,10 @@ public static class QuantizationKernels
                 var c2 = Vector256.Min(Vector256.Max(f2 * vInvScale, vMinClamp), vMaxClamp);
                 var c3 = Vector256.Min(Vector256.Max(f3 * vInvScale, vMinClamp), vMaxClamp);
 
-                var i0 = Vector256.ConvertToInt32(c0);
-                var i1 = Vector256.ConvertToInt32(c1);
-                var i2 = Vector256.ConvertToInt32(c2);
-                var i3 = Vector256.ConvertToInt32(c3);
+                var i0 = Avx.IsSupported ? Avx.ConvertToVector256Int32(c0) : Vector256.ConvertToInt32(Vector256.Round(c0, MidpointRounding.ToEven));
+                var i1 = Avx.IsSupported ? Avx.ConvertToVector256Int32(c1) : Vector256.ConvertToInt32(Vector256.Round(c1, MidpointRounding.ToEven));
+                var i2 = Avx.IsSupported ? Avx.ConvertToVector256Int32(c2) : Vector256.ConvertToInt32(Vector256.Round(c2, MidpointRounding.ToEven));
+                var i3 = Avx.IsSupported ? Avx.ConvertToVector256Int32(c3) : Vector256.ConvertToInt32(Vector256.Round(c3, MidpointRounding.ToEven));
 
                 var s0 = Sse2.PackSignedSaturate(i0.GetLower(), i0.GetUpper());
                 var s1 = Sse2.PackSignedSaturate(i1.GetLower(), i1.GetUpper());
@@ -485,10 +416,10 @@ public static class QuantizationKernels
                 var c2 = Vector128.Min(Vector128.Max(f2 * vInvScale, vMinClamp), vMaxClamp);
                 var c3 = Vector128.Min(Vector128.Max(f3 * vInvScale, vMinClamp), vMaxClamp);
 
-                var i0 = Vector128.ConvertToInt32(c0);
-                var i1 = Vector128.ConvertToInt32(c1);
-                var i2 = Vector128.ConvertToInt32(c2);
-                var i3 = Vector128.ConvertToInt32(c3);
+                var i0 = Sse2.ConvertToVector128Int32(c0);
+                var i1 = Sse2.ConvertToVector128Int32(c1);
+                var i2 = Sse2.ConvertToVector128Int32(c2);
+                var i3 = Sse2.ConvertToVector128Int32(c3);
 
                 var s0 = Sse2.PackSignedSaturate(i0, i1);
                 var s1 = Sse2.PackSignedSaturate(i2, i3);
@@ -519,10 +450,10 @@ public static class QuantizationKernels
                 var c2 = Vector128.Min(Vector128.Max(f2 * vInvScale, vMinClamp), vMaxClamp);
                 var c3 = Vector128.Min(Vector128.Max(f3 * vInvScale, vMinClamp), vMaxClamp);
 
-                var i0 = Vector128.ConvertToInt32(c0);
-                var i1 = Vector128.ConvertToInt32(c1);
-                var i2 = Vector128.ConvertToInt32(c2);
-                var i3 = Vector128.ConvertToInt32(c3);
+                var i0 = Vector128.ConvertToInt32(Vector128.Round(c0, MidpointRounding.ToEven));
+                var i1 = Vector128.ConvertToInt32(Vector128.Round(c1, MidpointRounding.ToEven));
+                var i2 = Vector128.ConvertToInt32(Vector128.Round(c2, MidpointRounding.ToEven));
+                var i3 = Vector128.ConvertToInt32(Vector128.Round(c3, MidpointRounding.ToEven));
 
                 var s0 = Vector128.Narrow(i0, i1);
                 var s1 = Vector128.Narrow(i2, i3);
@@ -535,7 +466,7 @@ public static class QuantizationKernels
         for (; i < count; i++)
         {
             float val = input[i] * invScale;
-            int q = (int)MathF.Round(val, MidpointRounding.AwayFromZero);
+            int q = (int)MathF.Round(val, MidpointRounding.ToEven);
             output[i] = (sbyte)Math.Clamp(q, -127, 127);
         }
 
@@ -562,6 +493,12 @@ public static class QuantizationKernels
     {
         if (input.Length != output.Length)
             throw new ArgumentException("Input and output lengths must match");
+
+        if (!float.IsFinite(scale))
+        {
+            output.Clear();
+            return;
+        }
 
         int count = input.Length;
         int i = 0;
@@ -594,6 +531,26 @@ public static class QuantizationKernels
                 f1.StoreUnsafe(ref rOut, (nuint)(i + 16));
                 f2.StoreUnsafe(ref rOut, (nuint)(i + 32));
                 f3.StoreUnsafe(ref rOut, (nuint)(i + 48));
+            }
+        }
+        else if (Vector256.IsHardwareAccelerated && count >= 32)
+        {
+            var vScale = Vector256.Create(scale);
+            ref sbyte rIn = ref MemoryMarshal.GetReference(input);
+            ref float rOut = ref MemoryMarshal.GetReference(output);
+            int limit = count - 32;
+
+            for (; i <= limit; i += 32)
+            {
+                var b32 = Vector256.LoadUnsafe(ref rIn, (nuint)i);
+                var (s0, s1) = Vector256.Widen(b32);
+                var (i0, i1) = Vector256.Widen(s0);
+                var (i2, i3) = Vector256.Widen(s1);
+
+                (Vector256.ConvertToSingle(i0) * vScale).StoreUnsafe(ref rOut, (nuint)i);
+                (Vector256.ConvertToSingle(i1) * vScale).StoreUnsafe(ref rOut, (nuint)(i + 8));
+                (Vector256.ConvertToSingle(i2) * vScale).StoreUnsafe(ref rOut, (nuint)(i + 16));
+                (Vector256.ConvertToSingle(i3) * vScale).StoreUnsafe(ref rOut, (nuint)(i + 24));
             }
         }
         else if (Vector128.IsHardwareAccelerated && count >= 16)
@@ -645,9 +602,14 @@ public static class QuantizationKernels
 
     public static float QuantizeFp8E4M3(ReadOnlySpan<float> input, Span<byte> output, bool writeScale = false)
     {
+        if (writeScale)
+        {
+            return QuantizeFp8E4M3(input, output);
+        }
+
         float maxAbs = FindMaxAbsolute(input);
 
-        if (maxAbs < 1e-10f || float.IsNaN(maxAbs) || float.IsInfinity(maxAbs))
+        if (!float.IsFinite(maxAbs) || maxAbs < 1e-10f)
         {
             output.Clear();
             return 1.0f;
@@ -655,7 +617,12 @@ public static class QuantizationKernels
 
         // Maximum representable value in E4M3FN is 448.0f
         float scale = maxAbs / 448.0f;
-        float invScale = 1.0f / scale;
+        float invScale = 448.0f / maxAbs;
+        if (!float.IsFinite(scale) || !float.IsFinite(invScale) || scale <= 0.0f)
+        {
+            output.Clear();
+            return 1.0f;
+        }
 
         for (int i = 0; i < input.Length; i++)
         {
@@ -678,6 +645,12 @@ public static class QuantizationKernels
     {
         if (input.Length != output.Length)
             throw new ArgumentException("Input and output lengths must match");
+
+        if (!float.IsFinite(scale))
+        {
+            output.Clear();
+            return;
+        }
 
         var lut = s_fp8E4M3ToFloat;
         int count = input.Length;
@@ -714,47 +687,52 @@ public static class QuantizationKernels
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte FloatToFp8E4M3(float val)
     {
-        if (val == 0.0f) return 0x00;
+        uint bits = BitConverter.SingleToUInt32Bits(val);
+        byte sign = (byte)((bits >> 24) & 0x80u);
+        uint absBits = bits & 0x7FFFFFFFu;
 
-        byte sign = 0;
-        if (val < 0.0f || float.IsNegative(val))
+        // Zero or NaN -> 0x00
+        if (absBits == 0 || absBits > 0x7F800000u)
+            return 0x00;
+
+        // Clamp >= 448.0f (0x43E00000) to max normal E4M3FN value (E=15, M=6 -> 0x7E)
+        if (absBits >= 0x43E00000u)
+            return (byte)(sign | 0x7E);
+
+        // Subnormal threshold: 2^-6 = 0.015625f (0x3C800000)
+        if (absBits < 0x3C800000u)
         {
-            sign = 0x80;
-            val = -val;
-        }
-
-        // Clamp to max representable normal value
-        if (val >= 448.0f) return (byte)(sign | 0x7E); // E=15, M=6
-
-        // Subnormal threshold: 2^(-6) = 1/64 = 0.015625
-        if (val < 0.015625f)
-        {
-            int subMant = (int)MathF.Round(val * 512.0f, MidpointRounding.AwayFromZero);
+            float absVal = BitConverter.UInt32BitsToSingle(absBits);
+            int subMant = (int)MathF.Round(absVal * 512.0f, MidpointRounding.ToEven);
             if (subMant <= 0) return sign;
-            if (subMant > 7) subMant = 7;
+            if (subMant >= 8) return (byte)(sign | 0x08);
             return (byte)(sign | subMant);
         }
 
-        // Normal numbers
-        int exp = (int)MathF.Floor(MathF.Log2(val)) + 7;
-        exp = Math.Clamp(exp, 1, 15);
+        // Fast IEEE-754 bit extraction for normal numbers in [2^-6, 448.0f)
+        int e4 = (int)(absBits >> 23) - (127 - 7);
+        uint mant23 = absBits & 0x7FFFFFu;
+        uint m3 = mant23 >> 20;
+        uint rem = mant23 & 0xFFFFFu;
 
-        float baseVal = MathF.Pow(2.0f, exp - 7);
-        int mant = (int)MathF.Round((val / baseVal - 1.0f) * 8.0f, MidpointRounding.AwayFromZero);
-
-        if (mant >= 8)
+        // Round-to-nearest-even on the remaining 20 mantissa bits
+        if (rem > 0x80000u || (rem == 0x80000u && (m3 & 1u) != 0))
         {
-            exp++;
-            mant = 0;
+            m3++;
+            if (m3 >= 8u)
+            {
+                m3 = 0;
+                e4++;
+            }
         }
 
-        if (exp >= 15 && mant >= 7)
+        if (e4 >= 15 && m3 >= 7u)
         {
-            exp = 15;
-            mant = 6;
+            e4 = 15;
+            m3 = 6u;
         }
 
-        return (byte)(sign | (exp << 3) | mant);
+        return (byte)(sign | (e4 << 3) | (int)m3);
     }
 
     // =========================================================================
@@ -765,22 +743,22 @@ public static class QuantizationKernels
     {
         if (a.Length != b.Length)
             throw new ArgumentException("Vector lengths must match for cosine similarity");
+        if (a.IsEmpty)
+            return 1.0;
 
-        double dot = 0.0;
-        double normA = 0.0;
-        double normB = 0.0;
-
-        for (int i = 0; i < a.Length; i++)
+        float cos = TensorPrimitives.CosineSimilarity(a, b);
+        if (float.IsNaN(cos))
         {
-            double va = a[i];
-            double vb = b[i];
-            dot += va * vb;
-            normA += va * va;
-            normB += vb * vb;
+            float normA = TensorPrimitives.Norm(a);
+            float normB = TensorPrimitives.Norm(b);
+            if (!float.IsNaN(normA) && !float.IsNaN(normB) && (normA <= 0.0f || normB <= 0.0f))
+            {
+                return 1.0;
+            }
+            return double.NaN;
         }
 
-        if (normA <= 0.0 || normB <= 0.0) return 1.0;
-        return dot / (Math.Sqrt(normA) * Math.Sqrt(normB));
+        return Math.Clamp((double)cos, -1.0, 1.0);
     }
 
     public static float ComputeMaxRelativeError(ReadOnlySpan<float> reference, ReadOnlySpan<float> actual)

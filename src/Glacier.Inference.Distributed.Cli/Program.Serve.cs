@@ -2,19 +2,171 @@ namespace Glacier.Inference.Distributed.Cli;
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Glacier.Inference.Sampling;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Glacier.Inference.Sampling;
+
+internal sealed record OpenAiModelItem(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("created")] long Created,
+    [property: JsonPropertyName("owned_by")] string OwnedBy);
+
+internal sealed record OpenAiModelsListResponse(
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("data")] OpenAiModelItem[] Data);
+
+internal sealed record ClusterStageStatusItem(
+    [property: JsonPropertyName("stage_index")] int StageIndex,
+    [property: JsonPropertyName("node_name")] string NodeName,
+    [property: JsonPropertyName("host")] string Host,
+    [property: JsonPropertyName("port")] int Port,
+    [property: JsonPropertyName("start_layer")] int StartLayer,
+    [property: JsonPropertyName("end_layer")] int EndLayer,
+    [property: JsonPropertyName("layer_count")] int LayerCount,
+    [property: JsonPropertyName("is_local")] bool IsLocal,
+    [property: JsonPropertyName("backend")] string Backend);
+
+internal sealed record ClusterStatusResponse(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("cluster")] string Cluster,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("total_layers")] int TotalLayers,
+    [property: JsonPropertyName("embedding_dim")] int EmbeddingDim,
+    [property: JsonPropertyName("vocab_size")] int VocabSize,
+    [property: JsonPropertyName("stages_count")] int StagesCount,
+    [property: JsonPropertyName("local_stages_count")] int LocalStagesCount,
+    [property: JsonPropertyName("remote_stages_count")] int RemoteStagesCount,
+    [property: JsonPropertyName("stages")] ClusterStageStatusItem[] Stages);
+
+internal sealed record OpenAiChatMessage(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("content")] string Content);
+
+internal sealed record OpenAiUsage(
+    [property: JsonPropertyName("prompt_tokens")] int PromptTokens,
+    [property: JsonPropertyName("completion_tokens")] int CompletionTokens,
+    [property: JsonPropertyName("total_tokens")] int TotalTokens);
+
+internal sealed record OpenAiChatChoice(
+    [property: JsonPropertyName("index")] int Index,
+    [property: JsonPropertyName("message")] OpenAiChatMessage Message,
+    [property: JsonPropertyName("finish_reason")] string? FinishReason);
+
+internal sealed record OpenAiChatCompletionResponse(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("created")] long Created,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("choices")] OpenAiChatChoice[] Choices,
+    [property: JsonPropertyName("usage")] OpenAiUsage Usage);
+
+internal sealed record OpenAiChatDelta(
+    [property: JsonPropertyName("role"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Role = null,
+    [property: JsonPropertyName("content"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Content = null);
+
+internal sealed record OpenAiChatStreamChoice(
+    [property: JsonPropertyName("index")] int Index,
+    [property: JsonPropertyName("delta")] OpenAiChatDelta Delta,
+    [property: JsonPropertyName("finish_reason")] string? FinishReason);
+
+internal sealed record OpenAiChatCompletionChunk(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("created")] long Created,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("choices")] OpenAiChatStreamChoice[] Choices);
+
+internal sealed record OpenAiErrorDetail(
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("type")] string Type,
+    [property: JsonPropertyName("param")] string? Param,
+    [property: JsonPropertyName("code")] int Code);
+
+internal sealed record OpenAiErrorEnvelope(
+    [property: JsonPropertyName("error")] OpenAiErrorDetail Error);
+
+internal sealed record OpenAiTextChoice(
+    [property: JsonPropertyName("index")] int Index,
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("finish_reason")] string? FinishReason);
+
+internal sealed record OpenAiTextCompletionResponse(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("created")] long Created,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("choices")] OpenAiTextChoice[] Choices,
+    [property: JsonPropertyName("usage")] OpenAiUsage Usage);
+
+internal sealed record OpenAiTextCompletionChunk(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("object")] string Object,
+    [property: JsonPropertyName("created")] long Created,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("choices")] OpenAiTextChoice[] Choices);
+
+internal sealed record OllamaModelDetails(
+    [property: JsonPropertyName("format")] string Format,
+    [property: JsonPropertyName("family")] string Family,
+    [property: JsonPropertyName("parameter_size")] string ParameterSize,
+    [property: JsonPropertyName("quantization_level")] string QuantizationLevel);
+
+internal sealed record OllamaTagModelItem(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("modified_at")] string ModifiedAt,
+    [property: JsonPropertyName("size")] long Size,
+    [property: JsonPropertyName("details")] OllamaModelDetails Details);
+
+internal sealed record OllamaTagsResponse(
+    [property: JsonPropertyName("models")] OllamaTagModelItem[] Models);
+
+internal sealed record OllamaChatResponse(
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("created_at")] string CreatedAt,
+    [property: JsonPropertyName("message")] OpenAiChatMessage Message,
+    [property: JsonPropertyName("done")] bool Done,
+    [property: JsonPropertyName("total_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? TotalDuration = null,
+    [property: JsonPropertyName("prompt_eval_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PromptEvalCount = null,
+    [property: JsonPropertyName("prompt_eval_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PromptEvalDuration = null,
+    [property: JsonPropertyName("eval_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EvalCount = null,
+    [property: JsonPropertyName("eval_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? EvalDuration = null);
+
+internal sealed record OllamaGenerateResponse(
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("created_at")] string CreatedAt,
+    [property: JsonPropertyName("response")] string Response,
+    [property: JsonPropertyName("done")] bool Done,
+    [property: JsonPropertyName("total_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? TotalDuration = null,
+    [property: JsonPropertyName("prompt_eval_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? PromptEvalCount = null,
+    [property: JsonPropertyName("prompt_eval_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? PromptEvalDuration = null,
+    [property: JsonPropertyName("eval_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EvalCount = null,
+    [property: JsonPropertyName("eval_duration"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? EvalDuration = null);
+
+[JsonSourceGenerationOptions(GenerationMode = JsonSourceGenerationMode.Default)]
+[JsonSerializable(typeof(OpenAiModelsListResponse))]
+[JsonSerializable(typeof(ClusterStatusResponse))]
+[JsonSerializable(typeof(OpenAiChatCompletionResponse))]
+[JsonSerializable(typeof(OpenAiChatCompletionChunk))]
+[JsonSerializable(typeof(OpenAiErrorEnvelope))]
+[JsonSerializable(typeof(OpenAiTextCompletionResponse))]
+[JsonSerializable(typeof(OpenAiTextCompletionChunk))]
+[JsonSerializable(typeof(OllamaTagsResponse))]
+[JsonSerializable(typeof(OllamaChatResponse))]
+[JsonSerializable(typeof(OllamaGenerateResponse))]
+internal partial class DistributedServeJsonContext : JsonSerializerContext
+{
+}
 
 public static partial class Program
 {
@@ -71,6 +223,10 @@ public static partial class Program
         string? apiKey = null)
     {
         var builder = WebApplication.CreateBuilder();
+        builder.Services.ConfigureHttpJsonOptions(options =>
+        {
+            options.SerializerOptions.TypeInfoResolverChain.Insert(0, DistributedServeJsonContext.Default);
+        });
         builder.Services.Configure<Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions>(options =>
         {
             options.Limits.MaxRequestBodySize = 32 * 1024 * 1024; // 32MB request body
@@ -98,7 +254,6 @@ public static partial class Program
         {
             app.Use(async (context, next) =>
             {
-                // Health endpoint can be public or authenticated
                 if (context.Request.Path == "/health")
                 {
                     await next();
@@ -135,46 +290,55 @@ public static partial class Program
         }
 
         // 1. GET /v1/models (OpenAI Standard)
-        app.MapGet("/v1/models", () => Results.Json(new
+        app.MapGet("/v1/models", () =>
         {
-            @object = "list",
-            data = new[]
-            {
-                new
-                {
-                    id = modelName,
-                    @object = "model",
-                    created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    owned_by = "glacier-cluster"
-                }
-            }
-        }));
+            var payload = new OpenAiModelsListResponse(
+                Object: "list",
+                Data:
+                [
+                    new OpenAiModelItem(
+                        Id: modelName,
+                        Object: "model",
+                        Created: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                        OwnedBy: "glacier-cluster")
+                ]);
+            return Results.Json(payload, DistributedServeJsonContext.Default.OpenAiModelsListResponse);
+        });
 
         // 2. GET /v1/cluster/status & /health
-        var getClusterStatus = () => Results.Json(new
+        Func<IResult> getClusterStatus = () =>
         {
-            status = "healthy",
-            cluster = "Glacier Distributed LLM Cluster",
-            model = modelName,
-            total_layers = session.TotalLayers,
-            embedding_dim = session.Dim,
-            vocab_size = session.VocabSize,
-            stages_count = session.Stages.Length,
-            local_stages_count = session.LocalModels.Count,
-            remote_stages_count = session.Streams.Count,
-            stages = session.Stages.Select((st, idx) => new
+            var stageItems = new ClusterStageStatusItem[session.Stages.Length];
+            for (int idx = 0; idx < session.Stages.Length; idx++)
             {
-                stage_index = idx,
-                node_name = st.Name,
-                host = st.Host,
-                port = st.Port,
-                start_layer = st.StartLayer,
-                end_layer = st.EndLayer,
-                layer_count = st.LayerCount,
-                is_local = idx < session.LocalModels.Count,
-                backend = idx < session.LocalModels.Count ? session.LocalModels[idx].BackendName : "Remote Gigabit TCP Worker"
-            })
-        });
+                var st = session.Stages[idx];
+                bool isLocal = idx < session.LocalModels.Count;
+                stageItems[idx] = new ClusterStageStatusItem(
+                    StageIndex: idx,
+                    NodeName: st.Name,
+                    Host: st.Host,
+                    Port: st.Port,
+                    StartLayer: st.StartLayer,
+                    EndLayer: st.EndLayer,
+                    LayerCount: st.LayerCount,
+                    IsLocal: isLocal,
+                    Backend: isLocal ? session.LocalModels[idx].BackendName : "Remote Gigabit TCP Worker");
+            }
+
+            var statusPayload = new ClusterStatusResponse(
+                Status: "healthy",
+                Cluster: "Glacier Distributed LLM Cluster",
+                Model: modelName,
+                TotalLayers: session.TotalLayers,
+                EmbeddingDim: session.Dim,
+                VocabSize: session.VocabSize,
+                StagesCount: session.Stages.Length,
+                LocalStagesCount: session.LocalModels.Count,
+                RemoteStagesCount: session.Streams.Count,
+                Stages: stageItems);
+
+            return Results.Json(statusPayload, DistributedServeJsonContext.Default.ClusterStatusResponse);
+        };
 
         app.MapGet("/v1/cluster/status", getClusterStatus);
         app.MapGet("/health", getClusterStatus);
@@ -182,10 +346,18 @@ public static partial class Program
         // 3. POST /v1/chat/completions (OpenAI Standard Chat Completion)
         app.MapPost("/v1/chat/completions", async (HttpContext ctx) =>
         {
-            JsonElement req;
+            List<(string Role, string Content)> messages;
+            bool stream;
+            SamplingOptions options;
+
             try
             {
-                req = await ctx.Request.ReadFromJsonAsync<JsonElement>(ctx.RequestAborted);
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+                var req = doc.RootElement;
+                messages = ParseMessages(req);
+                stream = req.TryGetProperty("stream", out var s) &&
+                         (s.ValueKind == JsonValueKind.True || (s.ValueKind != JsonValueKind.False && s.GetBoolean()));
+                options = ParseSamplingOptions(req);
             }
             catch
             {
@@ -194,7 +366,6 @@ public static partial class Program
                 return;
             }
 
-            var messages = ParseMessages(req);
             if (messages.Count == 0)
             {
                 ctx.Response.StatusCode = 400;
@@ -202,10 +373,6 @@ public static partial class Program
                 return;
             }
 
-            bool stream = req.TryGetProperty("stream", out var s) &&
-                          (s.ValueKind == JsonValueKind.True || (s.ValueKind != JsonValueKind.False && s.GetBoolean()));
-
-            var options = ParseSamplingOptions(req);
             string formattedPrompt = session.Tokenizer != null
                 ? session.Tokenizer.FormatChat(messages)
                 : string.Join("\n", messages.Select(m => $"{m.Role}: {m.Content}"));
@@ -214,42 +381,67 @@ public static partial class Program
 
             if (!stream)
             {
-                var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
-                var resp = new
+                try
                 {
-                    id = completionId,
-                    @object = "chat.completion",
-                    created = createdTimestamp,
-                    model = modelName,
-                    choices = new[]
+                    var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
+                    var resp = new OpenAiChatCompletionResponse(
+                        Id: completionId,
+                        Object: "chat.completion",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiChatChoice(
+                                Index: 0,
+                                Message: new OpenAiChatMessage("assistant", result.Text),
+                                FinishReason: result.FinishReason)
+                        ],
+                        Usage: new OpenAiUsage(
+                            PromptTokens: result.PromptTokens,
+                            CompletionTokens: result.GeneratedTokens,
+                            TotalTokens: result.PromptTokens + result.GeneratedTokens));
+
+                    await ctx.Response.WriteAsJsonAsync(
+                        resp,
+                        DistributedServeJsonContext.Default.OpenAiChatCompletionResponse,
+                        cancellationToken: ctx.RequestAborted);
+                    return;
+                }
+                catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] Non-streaming GenerateAsync failed: {ex}");
+                    Console.ResetColor();
+                    if (!ctx.Response.HasStarted)
                     {
-                        new
-                        {
-                            index = 0,
-                            message = new { role = "assistant", content = result.Text },
-                            finish_reason = result.FinishReason
-                        }
-                    },
-                    usage = new
-                    {
-                        prompt_tokens = result.PromptTokens,
-                        completion_tokens = result.GeneratedTokens,
-                        total_tokens = result.PromptTokens + result.GeneratedTokens
+                        ctx.Response.StatusCode = 500;
+                        var errPayload = new OpenAiErrorEnvelope(
+                            new OpenAiErrorDetail(
+                                Message: ex.Message,
+                                Type: "cluster_generation_error",
+                                Param: null,
+                                Code: 500));
+                        await ctx.Response.WriteAsJsonAsync(
+                            errPayload,
+                            DistributedServeJsonContext.Default.OpenAiErrorEnvelope,
+                            cancellationToken: ctx.RequestAborted);
                     }
-                };
-                await ctx.Response.WriteAsJsonAsync(resp, ctx.RequestAborted);
-                return;
+                    return;
+                }
             }
 
             // Streaming SSE response
             ctx.Response.ContentType = "text/event-stream; charset=utf-8";
             ctx.Response.Headers.CacheControl = "no-cache";
 
-            var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(256)
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
                 SingleWriter = true,
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.Wait
+                SingleReader = true
             });
 
             var genTask = Task.Run(async () =>
@@ -259,100 +451,148 @@ public static partial class Program
                     return await session.GenerateAsync(
                         formattedPrompt,
                         options,
-                        onToken: token => channel.Writer.TryWrite(token),
+                        onToken: token =>
+                        {
+                            if (!channel.Writer.TryWrite(token))
+                                throw new InvalidOperationException("Failed to enqueue streamed token.");
+                        },
                         ct: ctx.RequestAborted);
+                }
+                catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] Streaming GenerateAsync failed: {ex}");
+                    Console.ResetColor();
+                    throw;
                 }
                 finally
                 {
-                    channel.Writer.Complete();
+                    channel.Writer.TryComplete();
                 }
             });
 
-            // Initial chunk
-            var initialChunk = new
+            try
             {
-                id = completionId,
-                @object = "chat.completion.chunk",
-                created = createdTimestamp,
-                model = modelName,
-                choices = new[]
-                {
-                    new
-                    {
-                        index = 0,
-                        delta = new { role = "assistant", content = "" },
-                        finish_reason = (string?)null
-                    }
-                }
-            };
-            await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(initialChunk)}\n\n", ctx.RequestAborted);
-            await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                var initialChunk = new OpenAiChatCompletionChunk(
+                    Id: completionId,
+                    Object: "chat.completion.chunk",
+                    Created: createdTimestamp,
+                    Model: modelName,
+                    Choices:
+                    [
+                        new OpenAiChatStreamChoice(
+                            Index: 0,
+                            Delta: new OpenAiChatDelta(Role: "assistant", Content: ""),
+                            FinishReason: null)
+                    ]);
+                await ctx.Response.WriteAsync(
+                    $"data: {JsonSerializer.Serialize(initialChunk, DistributedServeJsonContext.Default.OpenAiChatCompletionChunk)}\n\n",
+                    ctx.RequestAborted);
+                await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
 
-            // Stream delta tokens
-            await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
-            {
-                var chunk = new
+                await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
                 {
-                    id = completionId,
-                    @object = "chat.completion.chunk",
-                    created = createdTimestamp,
-                    model = modelName,
-                    choices = new[]
-                    {
-                        new
-                        {
-                            index = 0,
-                            delta = new { content = token },
-                            finish_reason = (string?)null
-                        }
-                    }
-                };
-                await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(chunk)}\n\n", ctx.RequestAborted);
+                    var chunk = new OpenAiChatCompletionChunk(
+                        Id: completionId,
+                        Object: "chat.completion.chunk",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiChatStreamChoice(
+                                Index: 0,
+                                Delta: new OpenAiChatDelta(Content: token),
+                                FinishReason: null)
+                        ]);
+                    await ctx.Response.WriteAsync(
+                        $"data: {JsonSerializer.Serialize(chunk, DistributedServeJsonContext.Default.OpenAiChatCompletionChunk)}\n\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+
+                var genResult = await genTask;
+
+                var finalChunk = new OpenAiChatCompletionChunk(
+                    Id: completionId,
+                    Object: "chat.completion.chunk",
+                    Created: createdTimestamp,
+                    Model: modelName,
+                    Choices:
+                    [
+                        new OpenAiChatStreamChoice(
+                            Index: 0,
+                            Delta: new OpenAiChatDelta(),
+                            FinishReason: genResult.FinishReason)
+                    ]);
+                await ctx.Response.WriteAsync(
+                    $"data: {JsonSerializer.Serialize(finalChunk, DistributedServeJsonContext.Default.OpenAiChatCompletionChunk)}\n\n",
+                    ctx.RequestAborted);
+                await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
             }
-
-            var genResult = await genTask;
-            var finalChunk = new
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
             {
-                id = completionId,
-                @object = "chat.completion.chunk",
-                created = createdTimestamp,
-                model = modelName,
-                choices = new[]
+                try { await genTask; } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { await genTask; } catch { }
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Serve:Error] Generator task faulted: {ex}");
+                Console.ResetColor();
+
+                if (!ctx.RequestAborted.IsCancellationRequested)
                 {
-                    new
-                    {
-                        index = 0,
-                        delta = new { },
-                        finish_reason = genResult.FinishReason
-                    }
+                    var errChunk = new OpenAiChatCompletionChunk(
+                        Id: completionId,
+                        Object: "chat.completion.chunk",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiChatStreamChoice(
+                                Index: 0,
+                                Delta: new OpenAiChatDelta(Content: $"\n\n[Cluster Generation Error: {ex.Message}]"),
+                                FinishReason: "error")
+                        ]);
+                    await ctx.Response.WriteAsync(
+                        $"data: {JsonSerializer.Serialize(errChunk, DistributedServeJsonContext.Default.OpenAiChatCompletionChunk)}\n\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
                 }
-            };
-            await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(finalChunk)}\n\n", ctx.RequestAborted);
-            await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
-            await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+            }
         });
 
         // 4. POST /v1/completions (OpenAI Standard Text Completion)
         app.MapPost("/v1/completions", async (HttpContext ctx) =>
         {
-            JsonElement req;
+            string prompt = "";
+            bool stream;
+            SamplingOptions options;
+
             try
             {
-                req = await ctx.Request.ReadFromJsonAsync<JsonElement>(ctx.RequestAborted);
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+                var req = doc.RootElement;
+                if (req.TryGetProperty("prompt", out var p))
+                {
+                    if (p.ValueKind == JsonValueKind.String) prompt = p.GetString() ?? "";
+                    else if (p.ValueKind == JsonValueKind.Array && p.GetArrayLength() > 0) prompt = p[0].GetString() ?? "";
+                }
+                stream = req.TryGetProperty("stream", out var s) &&
+                         (s.ValueKind == JsonValueKind.True || (s.ValueKind != JsonValueKind.False && s.GetBoolean()));
+                options = ParseSamplingOptions(req);
             }
             catch
             {
                 ctx.Response.StatusCode = 400;
                 await ctx.Response.WriteAsync("Invalid JSON payload.", ctx.RequestAborted);
                 return;
-            }
-
-            string prompt = "";
-            if (req.TryGetProperty("prompt", out var p))
-            {
-                if (p.ValueKind == JsonValueKind.String) prompt = p.GetString() ?? "";
-                else if (p.ValueKind == JsonValueKind.Array && p.GetArrayLength() > 0) prompt = p[0].GetString() ?? "";
             }
 
             if (string.IsNullOrEmpty(prompt))
@@ -362,50 +602,67 @@ public static partial class Program
                 return;
             }
 
-            bool stream = req.TryGetProperty("stream", out var s) &&
-                          (s.ValueKind == JsonValueKind.True || (s.ValueKind != JsonValueKind.False && s.GetBoolean()));
-
-            var options = ParseSamplingOptions(req);
             string completionId = $"cmpl-{Guid.NewGuid():N}";
             long createdTimestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
             if (!stream)
             {
-                var result = await session.GenerateAsync(prompt, options, ct: ctx.RequestAborted);
-                var resp = new
+                try
                 {
-                    id = completionId,
-                    @object = "text_completion",
-                    created = createdTimestamp,
-                    model = modelName,
-                    choices = new[]
+                    var result = await session.GenerateAsync(prompt, options, ct: ctx.RequestAborted);
+                    var resp = new OpenAiTextCompletionResponse(
+                        Id: completionId,
+                        Object: "text_completion",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiTextChoice(
+                                Index: 0,
+                                Text: result.Text,
+                                FinishReason: result.FinishReason)
+                        ],
+                        Usage: new OpenAiUsage(
+                            PromptTokens: result.PromptTokens,
+                            CompletionTokens: result.GeneratedTokens,
+                            TotalTokens: result.PromptTokens + result.GeneratedTokens));
+
+                    await ctx.Response.WriteAsJsonAsync(
+                        resp,
+                        DistributedServeJsonContext.Default.OpenAiTextCompletionResponse,
+                        cancellationToken: ctx.RequestAborted);
+                    return;
+                }
+                catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] /v1/completions failed: {ex}");
+                    Console.ResetColor();
+                    if (!ctx.Response.HasStarted)
                     {
-                        new
-                        {
-                            index = 0,
-                            text = result.Text,
-                            finish_reason = result.FinishReason
-                        }
-                    },
-                    usage = new
-                    {
-                        prompt_tokens = result.PromptTokens,
-                        completion_tokens = result.GeneratedTokens,
-                        total_tokens = result.PromptTokens + result.GeneratedTokens
+                        ctx.Response.StatusCode = 500;
+                        var errPayload = new OpenAiErrorEnvelope(
+                            new OpenAiErrorDetail(ex.Message, "cluster_generation_error", null, 500));
+                        await ctx.Response.WriteAsJsonAsync(
+                            errPayload,
+                            DistributedServeJsonContext.Default.OpenAiErrorEnvelope,
+                            cancellationToken: ctx.RequestAborted);
                     }
-                };
-                await ctx.Response.WriteAsJsonAsync(resp, ctx.RequestAborted);
-                return;
+                    return;
+                }
             }
 
             ctx.Response.ContentType = "text/event-stream; charset=utf-8";
             ctx.Response.Headers.CacheControl = "no-cache";
 
-            var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(256)
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
                 SingleWriter = true,
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.Wait
+                SingleReader = true
             });
 
             var genTask = Task.Run(async () =>
@@ -415,88 +672,118 @@ public static partial class Program
                     return await session.GenerateAsync(
                         prompt,
                         options,
-                        onToken: token => channel.Writer.TryWrite(token),
+                        onToken: token =>
+                        {
+                            if (!channel.Writer.TryWrite(token))
+                                throw new InvalidOperationException("Failed to enqueue streamed token.");
+                        },
                         ct: ctx.RequestAborted);
                 }
                 finally
                 {
-                    channel.Writer.Complete();
+                    channel.Writer.TryComplete();
                 }
             });
 
-            await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
+            try
             {
-                var chunk = new
+                await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
                 {
-                    id = completionId,
-                    @object = "text_completion",
-                    created = createdTimestamp,
-                    model = modelName,
-                    choices = new[]
-                    {
-                        new
-                        {
-                            index = 0,
-                            text = token,
-                            finish_reason = (string?)null
-                        }
-                    }
-                };
-                await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(chunk)}\n\n", ctx.RequestAborted);
+                    var chunk = new OpenAiTextCompletionChunk(
+                        Id: completionId,
+                        Object: "text_completion",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiTextChoice(Index: 0, Text: token, FinishReason: null)
+                        ]);
+                    await ctx.Response.WriteAsync(
+                        $"data: {JsonSerializer.Serialize(chunk, DistributedServeJsonContext.Default.OpenAiTextCompletionChunk)}\n\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+
+                var genResult = await genTask;
+                var finalChunk = new OpenAiTextCompletionChunk(
+                    Id: completionId,
+                    Object: "text_completion",
+                    Created: createdTimestamp,
+                    Model: modelName,
+                    Choices:
+                    [
+                        new OpenAiTextChoice(Index: 0, Text: "", FinishReason: genResult.FinishReason)
+                    ]);
+                await ctx.Response.WriteAsync(
+                    $"data: {JsonSerializer.Serialize(finalChunk, DistributedServeJsonContext.Default.OpenAiTextCompletionChunk)}\n\n",
+                    ctx.RequestAborted);
+                await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
             }
-
-            var genResult = await genTask;
-            var finalChunk = new
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
             {
-                id = completionId,
-                @object = "text_completion",
-                created = createdTimestamp,
-                model = modelName,
-                choices = new[]
+                try { await genTask; } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { await genTask; } catch { }
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Serve:Error] Streaming /v1/completions faulted: {ex}");
+                Console.ResetColor();
+                if (!ctx.RequestAborted.IsCancellationRequested)
                 {
-                    new
-                    {
-                        index = 0,
-                        text = "",
-                        finish_reason = genResult.FinishReason
-                    }
+                    var errChunk = new OpenAiTextCompletionChunk(
+                        Id: completionId,
+                        Object: "text_completion",
+                        Created: createdTimestamp,
+                        Model: modelName,
+                        Choices:
+                        [
+                            new OpenAiTextChoice(Index: 0, Text: $"\n\n[Cluster Generation Error: {ex.Message}]", FinishReason: "error")
+                        ]);
+                    await ctx.Response.WriteAsync(
+                        $"data: {JsonSerializer.Serialize(errChunk, DistributedServeJsonContext.Default.OpenAiTextCompletionChunk)}\n\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
                 }
-            };
-            await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(finalChunk)}\n\n", ctx.RequestAborted);
-            await ctx.Response.WriteAsync("data: [DONE]\n\n", ctx.RequestAborted);
-            await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+            }
         });
 
         // 5. GET /api/tags (Ollama compatible tags list)
-        app.MapGet("/api/tags", () => Results.Json(new
+        app.MapGet("/api/tags", () =>
         {
-            models = new[]
-            {
-                new
-                {
-                    name = modelName,
-                    model = modelName,
-                    modified_at = DateTime.UtcNow.ToString("o"),
-                    size = File.Exists(session.ModelPath) ? (long)new FileInfo(session.ModelPath).Length : 0L,
-                    details = new
-                    {
-                        format = "gguf",
-                        family = session.MasterGguf?.Architecture ?? session.Architecture,
-                        parameter_size = $"{session.TotalLayers}L",
-                        quantization_level = "ClusterDistributed"
-                    }
-                }
-            }
-        }));
+            var payload = new OllamaTagsResponse(
+                Models:
+                [
+                    new OllamaTagModelItem(
+                        Name: modelName,
+                        Model: modelName,
+                        ModifiedAt: DateTime.UtcNow.ToString("o"),
+                        Size: File.Exists(session.ModelPath) ? new FileInfo(session.ModelPath).Length : 0L,
+                        Details: new OllamaModelDetails(
+                            Format: "gguf",
+                            Family: session.MasterGguf?.Architecture ?? session.Architecture,
+                            ParameterSize: $"{session.TotalLayers}L",
+                            QuantizationLevel: "ClusterDistributed"))
+                ]);
+            return Results.Json(payload, DistributedServeJsonContext.Default.OllamaTagsResponse);
+        });
 
         // 6. POST /api/chat (Ollama compatible chat)
         app.MapPost("/api/chat", async (HttpContext ctx) =>
         {
-            JsonElement req;
+            List<(string Role, string Content)> messages;
+            bool stream;
+            SamplingOptions options;
+
             try
             {
-                req = await ctx.Request.ReadFromJsonAsync<JsonElement>(ctx.RequestAborted);
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+                var req = doc.RootElement;
+                messages = ParseMessages(req);
+                stream = !req.TryGetProperty("stream", out var s) || s.ValueKind != JsonValueKind.False;
+                options = ParseSamplingOptions(req);
             }
             catch
             {
@@ -505,7 +792,6 @@ public static partial class Program
                 return;
             }
 
-            var messages = ParseMessages(req);
             if (messages.Count == 0)
             {
                 ctx.Response.StatusCode = 400;
@@ -513,37 +799,60 @@ public static partial class Program
                 return;
             }
 
-            bool stream = !req.TryGetProperty("stream", out var s) || s.ValueKind != JsonValueKind.False;
-            var options = ParseSamplingOptions(req);
             string formattedPrompt = session.Tokenizer != null
                 ? session.Tokenizer.FormatChat(messages)
                 : string.Join("\n", messages.Select(m => $"{m.Role}: {m.Content}"));
 
             if (!stream)
             {
-                var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
-                var respObj = new
+                try
                 {
-                    model = modelName,
-                    created_at = DateTime.UtcNow.ToString("o"),
-                    message = new { role = "assistant", content = result.Text },
-                    done = true,
-                    total_duration = (long)(result.TotalDuration.TotalSeconds * 1e9),
-                    prompt_eval_count = result.PromptTokens,
-                    prompt_eval_duration = (long)(result.PromptDuration.TotalSeconds * 1e9),
-                    eval_count = result.GeneratedTokens,
-                    eval_duration = (long)(result.GenerationDuration.TotalSeconds * 1e9)
-                };
-                await ctx.Response.WriteAsJsonAsync(respObj, ctx.RequestAborted);
-                return;
+                    var result = await session.GenerateAsync(formattedPrompt, options, ct: ctx.RequestAborted);
+                    var respObj = new OllamaChatResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Message: new OpenAiChatMessage("assistant", result.Text),
+                        Done: true,
+                        TotalDuration: (long)(result.TotalDuration.TotalSeconds * 1e9),
+                        PromptEvalCount: result.PromptTokens,
+                        PromptEvalDuration: (long)(result.PromptDuration.TotalSeconds * 1e9),
+                        EvalCount: result.GeneratedTokens,
+                        EvalDuration: (long)(result.GenerationDuration.TotalSeconds * 1e9));
+
+                    await ctx.Response.WriteAsJsonAsync(
+                        respObj,
+                        DistributedServeJsonContext.Default.OllamaChatResponse,
+                        cancellationToken: ctx.RequestAborted);
+                    return;
+                }
+                catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] /api/chat failed: {ex}");
+                    Console.ResetColor();
+                    if (!ctx.Response.HasStarted)
+                    {
+                        ctx.Response.StatusCode = 500;
+                        var errPayload = new OpenAiErrorEnvelope(
+                            new OpenAiErrorDetail(ex.Message, "cluster_generation_error", null, 500));
+                        await ctx.Response.WriteAsJsonAsync(
+                            errPayload,
+                            DistributedServeJsonContext.Default.OpenAiErrorEnvelope,
+                            cancellationToken: ctx.RequestAborted);
+                    }
+                    return;
+                }
             }
 
             ctx.Response.ContentType = "application/x-ndjson";
-            var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(256)
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
                 SingleWriter = true,
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.Wait
+                SingleReader = true
             });
 
             var genTask = Task.Run(async () =>
@@ -553,50 +862,87 @@ public static partial class Program
                     return await session.GenerateAsync(
                         formattedPrompt,
                         options,
-                        onToken: token => channel.Writer.TryWrite(token),
+                        onToken: token =>
+                        {
+                            if (!channel.Writer.TryWrite(token))
+                                throw new InvalidOperationException("Failed to enqueue streamed token.");
+                        },
                         ct: ctx.RequestAborted);
                 }
                 finally
                 {
-                    channel.Writer.Complete();
+                    channel.Writer.TryComplete();
                 }
             });
 
-            await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
+            try
             {
-                var chunk = new
+                await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
                 {
-                    model = modelName,
-                    created_at = DateTime.UtcNow.ToString("o"),
-                    message = new { role = "assistant", content = token },
-                    done = false
-                };
-                await ctx.Response.WriteAsync(JsonSerializer.Serialize(chunk) + "\n", ctx.RequestAborted);
+                    var chunk = new OllamaChatResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Message: new OpenAiChatMessage("assistant", token),
+                        Done: false);
+                    await ctx.Response.WriteAsync(
+                        JsonSerializer.Serialize(chunk, DistributedServeJsonContext.Default.OllamaChatResponse) + "\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+
+                var genResult = await genTask;
+                var finalChunk = new OllamaChatResponse(
+                    Model: modelName,
+                    CreatedAt: DateTime.UtcNow.ToString("o"),
+                    Message: new OpenAiChatMessage("assistant", ""),
+                    Done: true,
+                    TotalDuration: (long)(genResult.TotalDuration.TotalSeconds * 1e9),
+                    EvalCount: genResult.GeneratedTokens,
+                    EvalDuration: (long)(genResult.GenerationDuration.TotalSeconds * 1e9));
+                await ctx.Response.WriteAsync(
+                    JsonSerializer.Serialize(finalChunk, DistributedServeJsonContext.Default.OllamaChatResponse) + "\n",
+                    ctx.RequestAborted);
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
             }
-
-            var genResult = await genTask;
-            var finalChunk = new
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
             {
-                model = modelName,
-                created_at = DateTime.UtcNow.ToString("o"),
-                message = new { role = "assistant", content = "" },
-                done = true,
-                total_duration = (long)(genResult.TotalDuration.TotalSeconds * 1e9),
-                eval_count = genResult.GeneratedTokens,
-                eval_duration = (long)(genResult.GenerationDuration.TotalSeconds * 1e9)
-            };
-            await ctx.Response.WriteAsync(JsonSerializer.Serialize(finalChunk) + "\n", ctx.RequestAborted);
-            await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                try { await genTask; } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { await genTask; } catch { }
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Serve:Error] Streaming /api/chat faulted: {ex}");
+                Console.ResetColor();
+                if (!ctx.RequestAborted.IsCancellationRequested)
+                {
+                    var errChunk = new OllamaChatResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Message: new OpenAiChatMessage("assistant", $"\n\n[Cluster Generation Error: {ex.Message}]"),
+                        Done: true);
+                    await ctx.Response.WriteAsync(
+                        JsonSerializer.Serialize(errChunk, DistributedServeJsonContext.Default.OllamaChatResponse) + "\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+            }
         });
 
         // 7. POST /api/generate (Ollama compatible generate)
         app.MapPost("/api/generate", async (HttpContext ctx) =>
         {
-            JsonElement req;
+            string prompt;
+            bool stream;
+            SamplingOptions options;
+
             try
             {
-                req = await ctx.Request.ReadFromJsonAsync<JsonElement>(ctx.RequestAborted);
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+                var req = doc.RootElement;
+                prompt = req.TryGetProperty("prompt", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
+                stream = !req.TryGetProperty("stream", out var s) || s.ValueKind != JsonValueKind.False;
+                options = ParseSamplingOptions(req);
             }
             catch
             {
@@ -605,7 +951,6 @@ public static partial class Program
                 return;
             }
 
-            string prompt = req.TryGetProperty("prompt", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
             if (string.IsNullOrEmpty(prompt))
             {
                 ctx.Response.StatusCode = 400;
@@ -613,34 +958,56 @@ public static partial class Program
                 return;
             }
 
-            bool stream = !req.TryGetProperty("stream", out var s) || s.ValueKind != JsonValueKind.False;
-            var options = ParseSamplingOptions(req);
-
             if (!stream)
             {
-                var result = await session.GenerateAsync(prompt, options, ct: ctx.RequestAborted);
-                var respObj = new
+                try
                 {
-                    model = modelName,
-                    created_at = DateTime.UtcNow.ToString("o"),
-                    response = result.Text,
-                    done = true,
-                    total_duration = (long)(result.TotalDuration.TotalSeconds * 1e9),
-                    prompt_eval_count = result.PromptTokens,
-                    prompt_eval_duration = (long)(result.PromptDuration.TotalSeconds * 1e9),
-                    eval_count = result.GeneratedTokens,
-                    eval_duration = (long)(result.GenerationDuration.TotalSeconds * 1e9)
-                };
-                await ctx.Response.WriteAsJsonAsync(respObj, ctx.RequestAborted);
-                return;
+                    var result = await session.GenerateAsync(prompt, options, ct: ctx.RequestAborted);
+                    var respObj = new OllamaGenerateResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Response: result.Text,
+                        Done: true,
+                        TotalDuration: (long)(result.TotalDuration.TotalSeconds * 1e9),
+                        PromptEvalCount: result.PromptTokens,
+                        PromptEvalDuration: (long)(result.PromptDuration.TotalSeconds * 1e9),
+                        EvalCount: result.GeneratedTokens,
+                        EvalDuration: (long)(result.GenerationDuration.TotalSeconds * 1e9));
+
+                    await ctx.Response.WriteAsJsonAsync(
+                        respObj,
+                        DistributedServeJsonContext.Default.OllamaGenerateResponse,
+                        cancellationToken: ctx.RequestAborted);
+                    return;
+                }
+                catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Serve:Error] /api/generate failed: {ex}");
+                    Console.ResetColor();
+                    if (!ctx.Response.HasStarted)
+                    {
+                        ctx.Response.StatusCode = 500;
+                        var errPayload = new OpenAiErrorEnvelope(
+                            new OpenAiErrorDetail(ex.Message, "cluster_generation_error", null, 500));
+                        await ctx.Response.WriteAsJsonAsync(
+                            errPayload,
+                            DistributedServeJsonContext.Default.OpenAiErrorEnvelope,
+                            cancellationToken: ctx.RequestAborted);
+                    }
+                    return;
+                }
             }
 
             ctx.Response.ContentType = "application/x-ndjson";
-            var channel = Channel.CreateBounded<string>(new BoundedChannelOptions(256)
+            var channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
             {
                 SingleWriter = true,
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.Wait
+                SingleReader = true
             });
 
             var genTask = Task.Run(async () =>
@@ -650,41 +1017,71 @@ public static partial class Program
                     return await session.GenerateAsync(
                         prompt,
                         options,
-                        onToken: token => channel.Writer.TryWrite(token),
+                        onToken: token =>
+                        {
+                            if (!channel.Writer.TryWrite(token))
+                                throw new InvalidOperationException("Failed to enqueue streamed token.");
+                        },
                         ct: ctx.RequestAborted);
                 }
                 finally
                 {
-                    channel.Writer.Complete();
+                    channel.Writer.TryComplete();
                 }
             });
 
-            await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
+            try
             {
-                var chunk = new
+                await foreach (var token in channel.Reader.ReadAllAsync(ctx.RequestAborted))
                 {
-                    model = modelName,
-                    created_at = DateTime.UtcNow.ToString("o"),
-                    response = token,
-                    done = false
-                };
-                await ctx.Response.WriteAsync(JsonSerializer.Serialize(chunk) + "\n", ctx.RequestAborted);
+                    var chunk = new OllamaGenerateResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Response: token,
+                        Done: false);
+                    await ctx.Response.WriteAsync(
+                        JsonSerializer.Serialize(chunk, DistributedServeJsonContext.Default.OllamaGenerateResponse) + "\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+
+                var genResult = await genTask;
+                var finalChunk = new OllamaGenerateResponse(
+                    Model: modelName,
+                    CreatedAt: DateTime.UtcNow.ToString("o"),
+                    Response: "",
+                    Done: true,
+                    TotalDuration: (long)(genResult.TotalDuration.TotalSeconds * 1e9),
+                    EvalCount: genResult.GeneratedTokens,
+                    EvalDuration: (long)(genResult.GenerationDuration.TotalSeconds * 1e9));
+                await ctx.Response.WriteAsync(
+                    JsonSerializer.Serialize(finalChunk, DistributedServeJsonContext.Default.OllamaGenerateResponse) + "\n",
+                    ctx.RequestAborted);
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
             }
-
-            var genResult = await genTask;
-            var finalChunk = new
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)
             {
-                model = modelName,
-                created_at = DateTime.UtcNow.ToString("o"),
-                response = "",
-                done = true,
-                total_duration = (long)(genResult.TotalDuration.TotalSeconds * 1e9),
-                eval_count = genResult.GeneratedTokens,
-                eval_duration = (long)(genResult.GenerationDuration.TotalSeconds * 1e9)
-            };
-            await ctx.Response.WriteAsync(JsonSerializer.Serialize(finalChunk) + "\n", ctx.RequestAborted);
-            await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                try { await genTask; } catch { }
+            }
+            catch (Exception ex)
+            {
+                try { await genTask; } catch { }
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Serve:Error] Streaming /api/generate faulted: {ex}");
+                Console.ResetColor();
+                if (!ctx.RequestAborted.IsCancellationRequested)
+                {
+                    var errChunk = new OllamaGenerateResponse(
+                        Model: modelName,
+                        CreatedAt: DateTime.UtcNow.ToString("o"),
+                        Response: $"\n\n[Cluster Generation Error: {ex.Message}]",
+                        Done: true);
+                    await ctx.Response.WriteAsync(
+                        JsonSerializer.Serialize(errChunk, DistributedServeJsonContext.Default.OllamaGenerateResponse) + "\n",
+                        ctx.RequestAborted);
+                    await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
+                }
+            }
         });
     }
 

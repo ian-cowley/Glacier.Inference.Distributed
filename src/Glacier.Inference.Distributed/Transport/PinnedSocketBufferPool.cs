@@ -4,21 +4,20 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// Pre-allocated unmanaged pinned buffer pool for zero-allocation socket transport.
-/// Eliminates buffer resizing, pinned memory copying, and GC LOH fragmentation.
+/// Pre-allocated Pinned Object Heap (POH) buffer pool for zero-allocation socket transport.
+/// Eliminates buffer resizing, pinned memory copying, redundant GCHandle allocations, and GC LOH fragmentation.
 /// </summary>
 public sealed class PinnedSocketBufferPool : IDisposable
 {
     private readonly int _bufferSize;
     private readonly int _maxBuffers;
     private readonly byte[][] _pool;
-    private readonly GCHandle[] _handles;
     private readonly bool[] _inUse;
     private readonly object _lock = new();
     private bool _disposed;
 
     /// <summary>
-    /// Initializes a new pool of pinned byte arrays.
+    /// Initializes a new pool of POH-pinned byte arrays.
     /// </summary>
     /// <param name="bufferSize">Size in bytes for each contiguous buffer.</param>
     /// <param name="maxBuffers">Maximum number of pre-allocated buffers.</param>
@@ -30,13 +29,11 @@ public sealed class PinnedSocketBufferPool : IDisposable
         _bufferSize = bufferSize;
         _maxBuffers = maxBuffers;
         _pool = new byte[maxBuffers][];
-        _handles = new GCHandle[maxBuffers];
         _inUse = new bool[maxBuffers];
 
         for (int i = 0; i < maxBuffers; i++)
         {
             _pool[i] = GC.AllocateArray<byte>(bufferSize, pinned: true);
-            _handles[i] = GCHandle.Alloc(_pool[i], GCHandleType.Pinned);
             _inUse[i] = false;
         }
     }
@@ -145,21 +142,13 @@ public sealed class PinnedSocketBufferPool : IDisposable
     }
 
     /// <summary>
-    /// Disposes the pool, releasing all pinned GCHandles.
+    /// Disposes the pool.
     /// </summary>
     public void Dispose()
     {
         lock (_lock)
         {
-            if (_disposed) return;
             _disposed = true;
-            for (int i = 0; i < _maxBuffers; i++)
-            {
-                if (_handles[i].IsAllocated)
-                {
-                    _handles[i].Free();
-                }
-            }
         }
     }
 }

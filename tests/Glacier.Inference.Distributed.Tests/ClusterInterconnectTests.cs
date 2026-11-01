@@ -105,17 +105,22 @@ public class ClusterInterconnectTests
         Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("127.0.0.1"));
         Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("localhost"));
 
-        // Fleet endpoints on 192.168.1.0/24
-        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.1.111")); // Host Laptop
-        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.1.108")); // Beast
-        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.1.200")); // Linux
-        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.1.101")); // MinisForum64
+        // Private LAN (RFC 1918), CGNAT/Tailscale, Link-Local, IPv6 ULA
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.1.111"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.2.1"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("10.0.0.1"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("172.16.0.1"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("100.64.0.1"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("169.254.1.1"));
+        Assert.True(ClusterNetworkTransportHarness.IsSubnetAllowed("fd00::1"));
 
-        // External / unauthorized subnets must fail
+        // External / public / broadcast endpoints must fail
         Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("8.8.8.8"));
-        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("10.0.0.1"));
-        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("172.16.0.1"));
-        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("192.168.2.1"));
+        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("1.1.1.1"));
+        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("172.32.0.1"));
+        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("192.169.1.1"));
+        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("0.0.0.0"));
+        Assert.False(ClusterNetworkTransportHarness.IsSubnetAllowed("255.255.255.255"));
 
         Assert.Throws<SecurityException>(() => ClusterNetworkTransportHarness.ValidateSubnetOrThrow("8.8.8.8"));
     }

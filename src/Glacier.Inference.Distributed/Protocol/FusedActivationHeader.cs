@@ -27,7 +27,9 @@ public enum FusedActivationFlags : byte
     IsSpeculative = 1 << 0,
     IsPrefillChunk = 1 << 1,
     HasScale = 1 << 2,
-    FinalLayer = 1 << 3
+    FinalLayer = 1 << 3,
+    Stage0TokenInput = 1 << 4,
+    HasSamplingTrailer = 1 << 5
 }
 
 /// <summary>
@@ -107,6 +109,11 @@ public readonly struct FusedActivationHeader : IEquatable<FusedActivationHeader>
     public int GetPayloadByteCount()
     {
         int tokens = BatchTokens > 0 ? BatchTokens : 1;
+        if ((TypedFlags & FusedActivationFlags.Stage0TokenInput) != 0)
+        {
+            return tokens * sizeof(int);
+        }
+
         return TypedPrecision switch
         {
             WirePrecisionMode.FP32 => HiddenDim * tokens * 4,

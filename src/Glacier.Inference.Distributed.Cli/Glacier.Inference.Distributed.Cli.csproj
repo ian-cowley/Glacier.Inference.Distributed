@@ -7,10 +7,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
     <TieredPGO>true</TieredPGO>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 
     <!-- NuGet / Tool Properties -->
     <PackageId>Glacier.Inference.Distributed.Cli</PackageId>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <Authors>Ian Cowley</Authors>
     <Company>Glacier High-Performance Ecosystem</Company>
     <Description>Command-line interface (glacier-distributed) for the Glacier Distributed MoE Cluster. Launches heterogeneous pipeline coordinators and worker daemons across LAN nodes.</Description>
@@ -32,13 +33,16 @@
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Glacier.Cluster" Version="1.0.0" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
     <ProjectReference Include="..\Glacier.Inference.Distributed\Glacier.Inference.Distributed.csproj" />
+    <InternalsVisibleTo Include="Glacier.Inference.Distributed.Tests" />
   </ItemGroup>
 
-  <ItemGroup Condition="Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj')">
+  <ItemGroup Condition="Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj') and '$(UseLocalProjectReferences)' != 'false'">
     <ProjectReference Include="..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj" />
   </ItemGroup>
-  <ItemGroup Condition="!Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj')">
-    <PackageReference Include="Glacier.Inference" Version="1.3.0" />
+  <ItemGroup Condition="!Exists('..\..\..\Glacier.Inference\src\Glacier.Inference\Glacier.Inference.csproj') or '$(UseLocalProjectReferences)' == 'false'">
+    <PackageReference Include="Glacier.Inference" Version="1.3.2" />
   </ItemGroup>
 </Project>

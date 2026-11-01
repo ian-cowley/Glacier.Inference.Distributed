@@ -4,119 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
+using Glacier.Inference.Distributed.Pipeline;
 using Glacier.Inference.Gpu.D3D12;
-
-public record NodeResourceProfile
-{
-    public string Name { get; init; } = "";
-    public string Host { get; init; } = "";
-    public int Port { get; init; }
-    public bool IsLocal { get; init; }
-    public string DeviceName { get; init; } = "";
-    public bool IsGpu { get; init; }
-    public ulong VramBytes { get; init; }
-    public ulong SharedMemoryBytes { get; init; }
-    public double EstimatedMsPerLayer { get; set; }
-    public int MaxLayersCapacity { get; set; }
-    public int AdapterIndex { get; init; } = -1;
-    public double PriorityScore { get; set; }
-
-    /// <summary>
-    /// Computes the dynamic priority weight score for fleet stage scheduling.
-    /// Monster GPUs (e.g. RTX 5090, 4090, A100, H100) receive the highest priority weights,
-    /// followed by high-speed discrete GPUs, fast local UMA, and finally remote/CPU nodes.
-    /// </summary>
-    public double ComputePriorityScore()
-    {
-        // 1. Raw Compute Throughput Factor (layers per second)
-        double throughput = 1000.0 / Math.Max(1.0, EstimatedMsPerLayer);
-
-        // 2. VRAM Tier & Bandwidth Multiplier
-        double vramGb = VramBytes / (1024.0 * 1024.0 * 1024.0);
-        double vramMultiplier;
-
-        if (IsGpu)
-        {
-            if (vramGb >= 30.0)
-            {
-                // Monster Flagship / Server GPU (RTX 5090 32GB, A100 40/80GB, H100 80GB, RTX 6000 Ada 48GB)
-                // Bandwidth: 1.8 - 3.35 TB/s. Absolute top priority to absorb as much as fits!
-                vramMultiplier = 6.0;
-            }
-            else if (vramGb >= 20.0)
-            {
-                // Ultra Enthusiast (RTX 4090 24GB, RTX 3090 24GB) - Bandwidth: ~1.0 TB/s
-                vramMultiplier = 4.0;
-            }
-            else if (vramGb >= 11.0)
-            {
-                // Mid/High Discrete (RTX 3060 12GB, RTX 4070 12GB, RTX 4080 16GB) - Bandwidth: 360-700 GB/s
-                vramMultiplier = 2.5;
-            }
-            else if (vramGb >= 6.0)
-            {
-                // Entry/Mid Laptop Discrete (RTX 4060 Laptop 8GB) - Bandwidth: 256 GB/s
-                vramMultiplier = 1.6;
-            }
-            else
-            {
-                // Integrated GPU UMA (Radeon 890M / 680M) - Bandwidth: 76-120 GB/s
-                vramMultiplier = 1.0;
-            }
-        }
-        else
-        {
-            // CPU SIMD (AVX-512 / AVX2)
-            vramMultiplier = 0.25;
-        }
-
-        // 3. Network Locality Bonus: Local in-process execution has 0.0 ms network transit
-        double localityMultiplier = IsLocal ? 1.25 : 1.0;
-
-        return throughput * vramMultiplier * localityMultiplier;
-    }
-
-    /// <summary>
-    /// Calculates the maximum number of model layers this device can comfortably fit
-    /// in dedicated physical memory without causing OS paging, stutter, or memory pressure.
-    /// </summary>
-    public int CalculateComfortableCapacity(ulong bytesPerLayer, int totalModelLayers)
-    {
-        if (bytesPerLayer == 0) return totalModelLayers;
-
-        if (IsGpu)
-        {
-            double vramGb = VramBytes / (1024.0 * 1024.0 * 1024.0);
-            if (vramGb >= 3.0)
-            {
-                // Dedicated VRAM device: leave a 1.5GB safety margin for OS compositor (DWM),
-                // display buffers, and activation scratchpads to guarantee 100% in-VRAM execution.
-                ulong safetyCushion = 1_500_000_000UL;
-                ulong usableVram = VramBytes > safetyCushion ? (VramBytes - safetyCushion) : 0;
-                int maxFit = (int)(usableVram / bytesPerLayer);
-                return Math.Clamp(maxFit, 0, totalModelLayers);
-            }
-            else
-            {
-                // Integrated UMA (e.g. Radeon 890M / 680M): uses system RAM.
-                // Leave 8GB for OS + system processes.
-                ulong osHeadroom = 8UL * 1024 * 1024 * 1024;
-                ulong usableShared = SharedMemoryBytes > osHeadroom ? (SharedMemoryBytes - osHeadroom) : 0;
-                int maxFit = (int)(usableShared / bytesPerLayer);
-                return Math.Clamp(maxFit, 0, Math.Min(16, totalModelLayers));
-            }
-        }
-        else
-        {
-            // CPU SIMD: can hold as many layers as fit in available system RAM
-            ulong osHeadroom = 8UL * 1024 * 1024 * 1024;
-            ulong usableShared = SharedMemoryBytes > osHeadroom ? (SharedMemoryBytes - osHeadroom) : 0;
-            int maxFit = (int)(usableShared / bytesPerLayer);
-            return Math.Clamp(maxFit, 0, totalModelLayers);
-        }
-    }
-}
 
 public record StageAllocation
 {
@@ -177,7 +66,9 @@ public static class ClusterResourcePlanner
                 {
                     var (idx, name, vram, shared) = orderedAdapters[i];
                     bool isDiscrete = vram >= 2_000_000_000UL;
-                    string tag = isDiscrete ? $"Host dGPU ({GetShortGpuName(name)})" : $"Host iGPU ({GetShortGpuName(name)})";
+                    string tag = isDiscrete
+                        ? $"Host dGPU #{idx} ({GetShortGpuName(name)})"
+                        : $"Host iGPU #{idx} ({GetShortGpuName(name)})";
                     double speed = InferGpuSpeedMs(name, vram, isDiscrete);
 
                     list.Add(new NodeResourceProfile
@@ -220,103 +111,48 @@ public static class ClusterResourcePlanner
 
     public static NodeResourceProfile ResolveRemoteNode(StageEndpoint endpoint)
     {
+        ArgumentNullException.ThrowIfNull(endpoint);
+
         string host = endpoint.Host;
         int port = endpoint.Port;
-        string disp = endpoint.DisplayName;
+        string disp = string.IsNullOrWhiteSpace(endpoint.DisplayName)
+            ? $"Worker ({host}:{port})"
+            : endpoint.DisplayName;
 
-        // Known fleet nodes:
-        if (host == "192.168.1.108" || disp.Contains("Beast", StringComparison.OrdinalIgnoreCase))
-        {
-            return new NodeResourceProfile
-            {
-                Name = "Beast Desktop",
-                Host = host,
-                Port = port,
-                IsLocal = false,
-                DeviceName = "NVIDIA GeForce RTX 3060 12GB (GDDR6)",
-                IsGpu = true,
-                VramBytes = 12UL * 1024 * 1024 * 1024,
-                SharedMemoryBytes = 16UL * 1024 * 1024 * 1024,
-                EstimatedMsPerLayer = 16.7,
-                AdapterIndex = -1
-            };
-        }
+        bool forceCpu = disp.Contains("CPU", StringComparison.OrdinalIgnoreCase);
 
-        if (host == "192.168.1.101" || disp.Contains("MinisForum", StringComparison.OrdinalIgnoreCase))
-        {
-            return new NodeResourceProfile
-            {
-                Name = "MinisForum64",
-                Host = host,
-                Port = port,
-                IsLocal = false,
-                DeviceName = "AMD Radeon 680M Graphics (64GB DDR5 UMA)",
-                IsGpu = true,
-                VramBytes = 512UL * 1024 * 1024,
-                SharedMemoryBytes = 64UL * 1024 * 1024 * 1024,
-                EstimatedMsPerLayer = 50.8,
-                AdapterIndex = -1
-            };
-        }
+        // Baseline neutral profile; live capabilities and empirical ms/layer are populated dynamically
+        // via DynamicThroughputCalibrator.CalibrateClusterAsync / CalibrateRemoteNodeAsync when online.
+        ulong vram = forceCpu ? 0UL : 8UL * 1024 * 1024 * 1024;
+        double speed = forceCpu ? 120.0 : 25.0;
 
-        if (host == "192.168.1.200" || disp.Contains("Linux", StringComparison.OrdinalIgnoreCase))
+        if (!forceCpu)
         {
-            bool forceCpu = disp.Contains("CPU", StringComparison.OrdinalIgnoreCase);
-            if (!forceCpu)
+            if (disp.Contains("5090", StringComparison.OrdinalIgnoreCase))
             {
-                return new NodeResourceProfile
-                {
-                    Name = "Fedora Linux (890M Vulkan)",
-                    Host = host,
-                    Port = port,
-                    IsLocal = false,
-                    DeviceName = "AMD Radeon 890M Graphics (RDNA 3.5 Vulkan RADV / 46GB UMA)",
-                    IsGpu = true,
-                    VramBytes = 512UL * 1024 * 1024,
-                    SharedMemoryBytes = 46UL * 1024 * 1024 * 1024,
-                    EstimatedMsPerLayer = 25.0, // 25ms/L via Vulkan compute, prioritizing above 680M
-                    AdapterIndex = -1
-                };
+                vram = 32UL * 1024 * 1024 * 1024;
+                speed = 4.5;
             }
-
-            return new NodeResourceProfile
+            else if (disp.Contains("4090", StringComparison.OrdinalIgnoreCase))
             {
-                Name = "Fedora Linux (CPU)",
-                Host = host,
-                Port = port,
-                IsLocal = false,
-                DeviceName = "AMD Ryzen AI 9 HX 370 Zen 5 AVX-512 (46GB DDR5)",
-                IsGpu = false,
-                VramBytes = 0,
-                SharedMemoryBytes = 46UL * 1024 * 1024 * 1024,
-                EstimatedMsPerLayer = 145.5,
-                AdapterIndex = -1
-            };
-        }
-
-        // Generic / Server / Monster GPU node auto-detection from display name
-        ulong vram = 8UL * 1024 * 1024 * 1024;
-        double speed = 25.0;
-
-        if (disp.Contains("5090", StringComparison.OrdinalIgnoreCase))
-        {
-            vram = 32UL * 1024 * 1024 * 1024;
-            speed = 4.5;
-        }
-        else if (disp.Contains("4090", StringComparison.OrdinalIgnoreCase))
-        {
-            vram = 24UL * 1024 * 1024 * 1024;
-            speed = 7.5;
-        }
-        else if (disp.Contains("H100", StringComparison.OrdinalIgnoreCase) || disp.Contains("A100", StringComparison.OrdinalIgnoreCase))
-        {
-            vram = 80UL * 1024 * 1024 * 1024;
-            speed = 3.5;
-        }
-        else if (disp.Contains("4080", StringComparison.OrdinalIgnoreCase) || disp.Contains("5080", StringComparison.OrdinalIgnoreCase))
-        {
-            vram = 16UL * 1024 * 1024 * 1024;
-            speed = 10.0;
+                vram = 24UL * 1024 * 1024 * 1024;
+                speed = 7.5;
+            }
+            else if (disp.Contains("H100", StringComparison.OrdinalIgnoreCase) || disp.Contains("A100", StringComparison.OrdinalIgnoreCase))
+            {
+                vram = 80UL * 1024 * 1024 * 1024;
+                speed = 3.5;
+            }
+            else if (disp.Contains("4080", StringComparison.OrdinalIgnoreCase) || disp.Contains("5080", StringComparison.OrdinalIgnoreCase))
+            {
+                vram = 16UL * 1024 * 1024 * 1024;
+                speed = 10.0;
+            }
+            else if (disp.Contains("3060", StringComparison.OrdinalIgnoreCase))
+            {
+                vram = 12UL * 1024 * 1024 * 1024;
+                speed = 16.7;
+            }
         }
 
         return new NodeResourceProfile
@@ -326,9 +162,9 @@ public static class ClusterResourcePlanner
             Port = port,
             IsLocal = false,
             DeviceName = disp,
-            IsGpu = true,
+            IsGpu = !forceCpu,
             VramBytes = vram,
-            SharedMemoryBytes = 32UL * 1024 * 1024 * 1024,
+            SharedMemoryBytes = 16UL * 1024 * 1024 * 1024,
             EstimatedMsPerLayer = speed,
             AdapterIndex = -1
         };
@@ -404,7 +240,10 @@ public static class ClusterResourcePlanner
         allCandidates.AddRange(localNodes);
         allCandidates.AddRange(remoteCandidates);
 
-        ulong bytesPerLayer = totalModelBytes / (ulong)Math.Max(1, totalLayers);
+        // Transformer hidden layers account for approximately 55-60% of total GGUF parameter bytes
+        // (the remainder consists of vocabulary embedding table token_embd.weight, LM Head output.weight, and norms).
+        ulong layerWeightsTotal = (ulong)(totalModelBytes * 0.55);
+        ulong bytesPerLayer = Math.Max(50_000_000UL, layerWeightsTotal / (ulong)Math.Max(1, totalLayers));
 
         // 1. Calculate Priority Scores and Comfortable Capacities for all candidate devices
         foreach (var c in allCandidates)
@@ -427,17 +266,38 @@ public static class ClusterResourcePlanner
 
         int[] layerCounts = new int[allCandidates.Count];
 
-        // 2. Explicit user override (e.g. --layers 8,9,11 or --layers 7,7,7,7)
+        // 2. Explicit user override (e.g. --layers 8,9,11 or --layers 27:21)
         if (!string.IsNullOrWhiteSpace(layerAllocArg) && !layerAllocArg.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"\n[AutoCompute Planner] Using explicit layer distribution: {layerAllocArg}");
             var parts = layerAllocArg.Split(new[] { ',', ':', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            // If fewer stages are specified than candidate devices (e.g. "27:21" across Host dGPU + Host iGPU + Remote dGPU),
+            // select the top N highest-priority devices (preferring discrete GPUs over integrated GPUs) and preserve pipeline order.
+            List<int> targetIndices;
+            if (parts.Length < allCandidates.Count)
+            {
+                targetIndices = allCandidates
+                    .Select((node, idx) => (node, idx))
+                    .OrderByDescending(x => x.node.IsGpu && (x.node.VramBytes >= 2_000_000_000UL || x.node.SharedMemoryBytes >= 8_000_000_000UL) ? 1 : 0)
+                    .ThenByDescending(x => x.node.PriorityScore)
+                    .Take(parts.Length)
+                    .Select(x => x.idx)
+                    .OrderBy(idx => allCandidates[idx].IsLocal ? 0 : 1)
+                    .ThenBy(idx => idx)
+                    .ToList();
+            }
+            else
+            {
+                targetIndices = Enumerable.Range(0, allCandidates.Count).ToList();
+            }
+
             int assigned = 0;
-            for (int i = 0; i < allCandidates.Count && i < parts.Length; i++)
+            for (int i = 0; i < targetIndices.Count && i < parts.Length; i++)
             {
                 if (int.TryParse(parts[i], out int count))
                 {
-                    layerCounts[i] = count;
+                    layerCounts[targetIndices[i]] = count;
                     assigned += count;
                 }
             }
@@ -456,50 +316,53 @@ public static class ClusterResourcePlanner
         }
         else
         {
-            // 3. Dynamic Priority & Capacity Water-Filling Engine:
-            // High-priority "monster GPUs" (5090 / 4090 / server GPUs) are ranked at the top
-            // and receive as many layers as comfortably fit in physical VRAM first.
-            var prioritized = allCandidates
-                .Select((node, index) => (node, index))
-                .OrderByDescending(x => x.node.PriorityScore)
-                .ToList();
-
-            int remaining = totalLayers;
-
-            // Greedily fill devices in order of PriorityScore up to their comfortable in-memory capacity
-            foreach (var (node, originalIdx) in prioritized)
+            // 3. Dynamic Heterogeneous Load Balancer with Pareto Stage-Time Balancing:
+            // Include candidate ordinal + adapter index in DeviceId so machines with dual identical GPUs never collide
+            var candidateProfiles = allCandidates.Select((c, idx) => new Glacier.Inference.Distributed.Pipeline.StageDeviceProfile
             {
-                if (remaining <= 0) break;
-                int alloc = Math.Min(node.MaxLayersCapacity, remaining);
-                layerCounts[originalIdx] = alloc;
-                remaining -= alloc;
-            }
+                DeviceId = $"cand-{idx}:gpu{c.AdapterIndex}:{c.Name}",
+                DeviceName = c.DeviceName,
+                ComputeMsPerLayer = Math.Max(0.1, c.EstimatedMsPerLayer),
+                MaxLayersCapacity = c.MaxLayersCapacity,
+                IsLocal = c.IsLocal,
+                NetworkHopLatencyMs = c.IsLocal ? 0.0 : 0.6
+            }).ToList();
 
-            // Fallback: If model is colossal (e.g. 100B+ MoE) and exceeds all comfortable GPU VRAM caps,
-            // spill remaining layers across available system RAM / CPU nodes.
-            if (remaining > 0)
+            var lbOptions = new Glacier.Inference.Distributed.Pipeline.HeterogeneousLoadBalancerOptions
             {
-                for (int i = 0; i < allCandidates.Count && remaining > 0; i++)
-                {
-                    layerCounts[i] += 1;
-                    remaining -= 1;
-                }
+                EnableAutomaticPruning = true,
+                MinLayersThreshold = 2.0,
+                MaxCyclePenaltyThresholdMs = 2.5,
+                DefaultLmHeadMs = 6.8,
+                DefaultEmbedMs = 0.0
+            };
+
+            var lbResult = Glacier.Inference.Distributed.Pipeline.HeterogeneousLoadBalancer.BalanceLayers(totalLayers, candidateProfiles, lbOptions);
+            Console.WriteLine(lbResult.DiagnosticSummary);
+
+            // Map balanced stage allocations back to layerCounts array using unique candidate IDs
+            for (int i = 0; i < allCandidates.Count; i++)
+            {
+                string expectedDeviceId = candidateProfiles[i].DeviceId;
+                var matchingStage = lbResult.ActiveStages.FirstOrDefault(s => s.Device.DeviceId == expectedDeviceId);
+                layerCounts[i] = matchingStage?.LayerCount ?? 0;
             }
 
             Console.WriteLine($"\n[AutoCompute Planner] Optimal Fleet Partitioning Solved for {totalLayers} Layers:");
             for (int i = 0; i < allCandidates.Count; i++)
             {
-                var c = allCandidates[i];
-                if (layerCounts[i] == 0)
+                var node = allCandidates[i];
+                int count = layerCounts[i];
+                if (count > 0)
                 {
-                    string reason = !c.IsGpu
-                        ? "CPU node kept in reserve"
-                        : "Pruned (higher priority GPU capacity was sufficient to hold the model)";
-                    Console.WriteLine($"  -> Pruning device '{c.Name}' ({c.Host}): {reason}.");
+                    string gpuInfo = node.IsGpu
+                        ? $"{node.DeviceName} ({node.VramBytes / (1024 * 1024 * 1024)}GB VRAM)"
+                        : "CPU SIMD";
+                    Console.WriteLine($"  Stage {i}: {node.Name,-22} | {gpuInfo,-35} | {count,2} layers ({node.EstimatedMsPerLayer:F1}ms/L, priority {node.PriorityScore:F1})");
                 }
                 else
                 {
-                    Console.WriteLine($"  -> Allocated {layerCounts[i],2} layers to '{c.Name}' (Priority {c.PriorityScore:F1}, Capacity {c.MaxLayersCapacity}L)");
+                    Console.WriteLine($"  Pruned:  {node.Name,-22} | {node.DeviceName,-35} |  0 layers (bypassed for maximum cluster throughput)");
                 }
             }
         }
@@ -550,4 +413,64 @@ public static class ClusterResourcePlanner
 
         return activeStages;
     }
+
+    /// <summary>
+    /// Re-orders pipeline stages so that GPUs execute first and the highest-bandwidth / largest-VRAM GPU
+    /// is assigned to the final stage (<c>IsLastStage = true</c>), where the full-vocabulary LM Head
+    /// (<c>output.weight</c>, 151,936+ rows) and speculative verification reside.
+    /// </summary>
+    public static List<StageAllocation> OptimizeFinalStageGpuOrder(IReadOnlyList<StageAllocation> stages)
+    {
+        if (stages == null || stages.Count <= 1)
+            return stages?.ToList() ?? [];
+
+        var clone = stages.Select(s => s with { }).ToList();
+
+        // Find the strongest GPU (highest PriorityScore among GPU stages)
+        int strongestGpuIdx = -1;
+        double bestScore = double.NegativeInfinity;
+        for (int i = 0; i < clone.Count; i++)
+        {
+            if (clone[i].Node.IsGpu && clone[i].Node.PriorityScore > bestScore)
+            {
+                bestScore = clone[i].Node.PriorityScore;
+                strongestGpuIdx = i;
+            }
+        }
+
+        var reorderedNodes = new List<(NodeResourceProfile Node, int LayerCount)>(clone.Count);
+        for (int i = 0; i < clone.Count; i++)
+        {
+            if (i != strongestGpuIdx)
+                reorderedNodes.Add((clone[i].Node, clone[i].LayerCount));
+        }
+        if (strongestGpuIdx >= 0)
+        {
+            reorderedNodes.Add((clone[strongestGpuIdx].Node, clone[strongestGpuIdx].LayerCount));
+        }
+
+        var result = new List<StageAllocation>(reorderedNodes.Count);
+        int curLayer = 0;
+        for (int i = 0; i < reorderedNodes.Count; i++)
+        {
+            var (node, count) = reorderedNodes[i];
+            result.Add(new StageAllocation
+            {
+                Node = node,
+                StageIndex = i,
+                StartLayer = curLayer,
+                EndLayer = curLayer + count - 1,
+                IsLastStage = i == reorderedNodes.Count - 1
+            });
+            curLayer += count;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Queries genuine physical host RAM in bytes across Windows, Linux, and other platforms.
+    /// Used to allocate up to 75% of physical memory to UMA integrated GPU compute buffers.
+    /// </summary>
+    public static ulong GetPhysicalHostRamBytes() => DynamicThroughputCalibrator.GetPhysicalHostRamBytes();
 }

@@ -48,7 +48,7 @@ Instead of requiring expensive enterprise datacenter servers or 80GB VRAM GPUs, 
 * **Integrated APUs / iGPUs** (AMD Radeon 680M / 780M / 890M with Unified DDR5 Memory)
 * **High-Core CPUs** (AMD Ryzen Zen 4/Zen 5 or Intel AVX-512 multithreaded SIMD)
 
-Activation tensors are streamed sequentially through pipeline stages over low-latency TCP frames using `System.IO.Pipelines` and 32-byte binary wire headers, achieving **over 99.8% compute utilization** with negligible network transit overhead (~7.9 ms per token across the cluster).
+Activation tensors are streamed sequentially through pipeline stages over low-latency TCP frames using `System.IO.Pipelines` and 64-byte fused binary wire headers (`ClusterFrameHeader` 32B + `FusedActivationHeader` 32B) with dynamic `FP32`/`FP16`/`INT8` wire precision, achieving **over 99.8% compute utilization** with negligible network transit overhead (~0.45 ms LAN transit per token across the cluster).
 
 ```mermaid
 graph TD
@@ -71,7 +71,7 @@ graph TD
         Head[LM Head & Logits]
     end
 
-    Host -- "Zero-Copy Wire Frame (32B Header + FP32 Activation)" --> Node1
+    Host -- "Zero-Copy Fused Wire Frame (64B Header + Dynamic FP32/FP16/INT8 Activation)" --> Node1
     Node1 -- "Updated Activation Frame (System.IO.Pipelines)" --> Node2
     Node2 -- "Updated Activation Frame (TCP Socket)" --> Node3
     Node3 -- "Logits / Next Token ID" --> Host
@@ -88,10 +88,10 @@ Download the pre-compiled native executable for your OS from the **[GitHub Relea
 
 | Operating System | Architecture | Archive | Contents |
 | :--- | :--- | :--- | :--- |
-| **Windows** | x64 (Intel/AMD) | `glacier-distributed-v1.2.0-win-x64.zip` | `glacier-distributed.exe` |
-| **Windows** | ARM64 | `glacier-distributed-v1.2.0-win-arm64.zip` | `glacier-distributed.exe` |
-| **Linux** | x64 (Ubuntu/Debian/Fedora/Arch) | `glacier-distributed-v1.2.0-linux-x64.tar.gz` | `glacier-distributed` |
-| **macOS** | Apple Silicon (M1/M2/M3/M4) | `glacier-distributed-v1.2.0-osx-arm64.tar.gz` | `glacier-distributed` |
+| **Windows** | x64 (Intel/AMD) | `glacier-distributed-v1.2.1-win-x64.zip` | `glacier-distributed.exe` |
+| **Windows** | ARM64 | `glacier-distributed-v1.2.1-win-arm64.zip` | `glacier-distributed.exe` |
+| **Linux** | x64 (Ubuntu/Debian/Fedora/Arch) | `glacier-distributed-v1.2.1-linux-x64.tar.gz` | `glacier-distributed` |
+| **macOS** | Apple Silicon (M1/M2/M3/M4) | `glacier-distributed-v1.2.1-osx-arm64.tar.gz` | `glacier-distributed` |
 
 Unzip and run directly from your terminal:
 ```bash
@@ -136,7 +136,7 @@ cd Glacier.Inference.Distributed
 
 ### Step 2: Download the GGUF Model (Pure C# / Native Shells)
 
-Glacier provides a **pure C# multi-stream HTTP Range downloader** built directly into the CLI (`glacier-distributed download`). It opens 8 concurrent HTTP/2 sockets to saturate gigabit connections (70–110 MB/s), pre-allocating sparse files on disk with zero temporary parts:
+Glacier provides a **pure C# multi-stream HTTP Range downloader** built directly into the CLI (`glacier-distributed download`). It opens 8 concurrent HTTP/2 sockets to saturate gigabit connections (70–110 MB/s), verifying `206 Partial Content` chunk integrity into an atomic `.part` staging file before committing:
 
 #### A. Download via Pure C# (.NET CLI)
 ```bash
@@ -353,26 +353,46 @@ Measured live across the 4 physical cluster nodes on a standard 1 Gbps LAN runni
 You can also orchestrate distributed inference directly inside your own .NET 10 application:
 
 ```csharp
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Glacier.Inference.Distributed;
+using Glacier.Inference.Distributed.Cli;
+using Glacier.Inference.Sampling;
 
-// 1. Configure remote stage endpoints
-var endpoints = new[]
+// A. Multi-Node Cluster Session (GGUF Layer Slicing + Fused 64B Wire Framing)
+var endpoints = new List<StageEndpoint>
 {
-    new StageEndpoint("192.168.1.108", 5055, "Beast RTX 3060"),
-    new StageEndpoint("192.168.1.101", 5056, "MinisForum 680M"),
-    new StageEndpoint("192.168.1.200", 5057, "Linux Zen 5 AVX-512")
+    new StageEndpoint("192.168.1.108", 5055, "Node 1 RTX 3060"),
+    new StageEndpoint("192.168.1.101", 5056, "Node 2 Radeon 680M"),
+    new StageEndpoint("192.168.1.200", 5057, "Node 3 Zen 5 AVX-512")
 };
 
-// 2. Initialize the pipeline coordinator
-using var coordinator = new DistributedPipelineCoordinator(
-    stages: endpoints,
-    modelPath: "models/Mixtral-8x22B-Instruct-v0.1.i1-IQ2_XXS.gguf");
+using var session = await DistributedClusterSession.InitializeAsync(
+    remoteEndpoints: endpoints,
+    modelPath: "models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+    cacheDir: ".glacier_stage_cache");
 
-// 3. Generate streaming tokens
-await foreach (var token in coordinator.GenerateStreamAsync("What is heterogeneous computing?"))
-{
-    Console.Write(token);
-}
+await session.GenerateAsync(
+    prompt: "What is heterogeneous computing?",
+    samplingOptions: new SamplingOptions { MaxTokens = 128, Temperature = 0.7f },
+    onToken: Console.Write);
+
+// B. In-Process 3-Stage MoE Partition Coordinator (Stage 0 -> Expert Pool -> Accumulator)
+const int hiddenDim = 4096;
+using var stage0 = new AttentionRootStageWorker(hiddenDim);
+using var stage1 = new CpuWarmExpertPoolWorker(expertCount: 8, hiddenDim: hiddenDim, intermediateDim: 14336);
+using var stage2 = new AccumulatorStageWorker(hiddenDim);
+using var coordinator = new DistributedPipelineCoordinator(stage0, stage1, stage2, hiddenDim);
+
+float[] embedding = new float[hiddenDim];
+using var outputBuffer = coordinator.ExecuteStep(
+    sequenceId: 1UL,
+    tokenIndex: 0,
+    layerIndex: 0,
+    inputEmbedding: MemoryMarshal.AsBytes(embedding.AsSpan()),
+    selectedExperts: [0, 2],
+    expertWeights: [0.6f, 0.4f]);
 ```
 
 ---
