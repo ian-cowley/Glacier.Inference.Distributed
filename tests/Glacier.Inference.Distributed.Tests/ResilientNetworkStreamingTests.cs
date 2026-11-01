@@ -24,8 +24,9 @@ public class ResilientNetworkStreamingTests
         FusedSocketTransport.ConfigureSocket(socket, 4 * 1024 * 1024);
 
         Assert.True(socket.NoDelay);
-        Assert.Equal(4 * 1024 * 1024, socket.ReceiveBufferSize);
-        Assert.Equal(4 * 1024 * 1024, socket.SendBufferSize);
+        int expectedMinBuffer = OperatingSystem.IsWindows() ? 4 * 1024 * 1024 : 256 * 1024;
+        Assert.True(socket.ReceiveBufferSize >= expectedMinBuffer, $"ReceiveBufferSize was {socket.ReceiveBufferSize}");
+        Assert.True(socket.SendBufferSize >= expectedMinBuffer, $"SendBufferSize was {socket.SendBufferSize}");
 
         // KeepAlive socket option must be enabled
         var keepAlive = (int)socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive)!;

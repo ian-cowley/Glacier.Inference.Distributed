@@ -219,8 +219,9 @@ public class FusedZeroAllocationTransportTests
         FusedSocketTransport.ConfigureSocket(socket, bufferSizeBytes: 4 * 1024 * 1024);
 
         Assert.True(socket.NoDelay);
-        Assert.True(socket.SendBufferSize >= 4 * 1024 * 1024);
-        Assert.True(socket.ReceiveBufferSize >= 4 * 1024 * 1024);
+        int expectedMinBuffer = OperatingSystem.IsWindows() ? 4 * 1024 * 1024 : 256 * 1024;
+        Assert.True(socket.SendBufferSize >= expectedMinBuffer, $"SendBufferSize was {socket.SendBufferSize}");
+        Assert.True(socket.ReceiveBufferSize >= expectedMinBuffer, $"ReceiveBufferSize was {socket.ReceiveBufferSize}");
     }
 
     [Fact]

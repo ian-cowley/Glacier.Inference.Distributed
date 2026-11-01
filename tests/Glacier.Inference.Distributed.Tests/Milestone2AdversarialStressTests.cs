@@ -624,36 +624,39 @@ public class Milestone2AdversarialStressTests
         for (int i = 0; i < 100; i++) sendSpan[i] = (byte)(i * 3);
         sendSpan[^1] = 0xFE;
 
-        // Perform socket send from arena send buffer
-        FusedSocketTransport.SendFusedActivation(
+        // Perform socket send concurrently with receive so 20.97 MB payload never deadlocks Linux SO_SNDBUF
+        var sendFp16Task = Task.Run(() => FusedSocketTransport.SendFusedActivation(
             client,
             correlationId: 100UL,
             actHeader: actHdr,
-            activationPayload: sendSpan,
-            stagingBuffer: arena.BatchWireSendArray);
+            activationPayload: arena.BatchWireSendArray.AsSpan(FusedSocketTransport.CombinedHeaderSize, fp16PayloadBytes),
+            stagingBuffer: arena.BatchWireSendArray));
 
         // Receive into arena receive buffer
-        bool ok = FusedSocketTransport.ReceiveFusedActivation(
-            server,
-            arena.BatchWireRecvArray,
-            out var rxClusterHdr,
-            out var rxActHdr,
-            out var rxPayload);
-
-        Assert.True(ok);
-        Assert.Equal(ClusterFrameHeader.MagicConstant, rxClusterHdr.Magic);
-        Assert.Equal(FusedActivationHeader.FusedMagic, rxActHdr.Magic);
-        Assert.Equal(100UL, rxActHdr.SequenceId);
-        Assert.Equal((ushort)2048, rxActHdr.BatchTokens);
-        Assert.Equal(WirePrecisionMode.FP16, rxActHdr.TypedPrecision);
-        Assert.Equal(fp16PayloadBytes, rxPayload.Length);
-
-        // Verify canary values across 20.97 MB payload
-        for (int i = 0; i < 100; i++)
         {
-            Assert.Equal((byte)(i * 3), rxPayload[i]);
+            bool ok = FusedSocketTransport.ReceiveFusedActivation(
+                server,
+                arena.BatchWireRecvArray,
+                out var rxClusterHdr,
+                out var rxActHdr,
+                out var rxPayload);
+
+            Assert.True(ok);
+            Assert.Equal(ClusterFrameHeader.MagicConstant, rxClusterHdr.Magic);
+            Assert.Equal(FusedActivationHeader.FusedMagic, rxActHdr.Magic);
+            Assert.Equal(100UL, rxActHdr.SequenceId);
+            Assert.Equal((ushort)2048, rxActHdr.BatchTokens);
+            Assert.Equal(WirePrecisionMode.FP16, rxActHdr.TypedPrecision);
+            Assert.Equal(fp16PayloadBytes, rxPayload.Length);
+
+            // Verify canary values across 20.97 MB payload
+            for (int i = 0; i < 100; i++)
+            {
+                Assert.Equal((byte)(i * 3), rxPayload[i]);
+            }
+            Assert.Equal((byte)0xFE, rxPayload[^1]);
         }
-        Assert.Equal((byte)0xFE, rxPayload[^1]);
+        await sendFp16Task;
 
         // 2. Test FP32 2048 tokens (~41.94 MB wire payload)
         int fp32PayloadBytes = 2048 * DeepSeekHiddenDim * sizeof(float);
@@ -666,30 +669,35 @@ public class Milestone2AdversarialStressTests
             flags: FusedActivationFlags.IsPrefillChunk,
             batchTokens: 2048);
 
-        var sendSpanFp32 = arena.BatchWireSendArray.AsSpan(FusedSocketTransport.CombinedHeaderSize, fp32PayloadBytes);
-        sendSpanFp32[0] = 0xAA;
-        sendSpanFp32[1000] = 0xBB;
-        sendSpanFp32[^1] = 0xCC;
+        {
+            var sendSpanFp32 = arena.BatchWireSendArray.AsSpan(FusedSocketTransport.CombinedHeaderSize, fp32PayloadBytes);
+            sendSpanFp32[0] = 0xAA;
+            sendSpanFp32[1000] = 0xBB;
+            sendSpanFp32[^1] = 0xCC;
+        }
 
-        FusedSocketTransport.SendFusedActivation(
+        var sendFp32Task = Task.Run(() => FusedSocketTransport.SendFusedActivation(
             client,
             correlationId: 200UL,
             actHeader: actHdrFp32,
-            activationPayload: sendSpanFp32,
-            stagingBuffer: arena.BatchWireSendArray);
+            activationPayload: arena.BatchWireSendArray.AsSpan(FusedSocketTransport.CombinedHeaderSize, fp32PayloadBytes),
+            stagingBuffer: arena.BatchWireSendArray));
 
-        bool okFp32 = FusedSocketTransport.ReceiveFusedActivation(
-            server,
-            arena.BatchWireRecvArray,
-            out var rxClusterHdrFp32,
-            out var rxActHdrFp32,
-            out var rxPayloadFp32);
+        {
+            bool okFp32 = FusedSocketTransport.ReceiveFusedActivation(
+                server,
+                arena.BatchWireRecvArray,
+                out var rxClusterHdrFp32,
+                out var rxActHdrFp32,
+                out var rxPayloadFp32);
 
-        Assert.True(okFp32);
-        Assert.Equal(fp32PayloadBytes, rxPayloadFp32.Length);
-        Assert.Equal((byte)0xAA, rxPayloadFp32[0]);
-        Assert.Equal((byte)0xBB, rxPayloadFp32[1000]);
-        Assert.Equal((byte)0xCC, rxPayloadFp32[^1]);
+            Assert.True(okFp32);
+            Assert.Equal(fp32PayloadBytes, rxPayloadFp32.Length);
+            Assert.Equal((byte)0xAA, rxPayloadFp32[0]);
+            Assert.Equal((byte)0xBB, rxPayloadFp32[1000]);
+            Assert.Equal((byte)0xCC, rxPayloadFp32[^1]);
+        }
+        await sendFp32Task;
     }
 
     [Fact]
