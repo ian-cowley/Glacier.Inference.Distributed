@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **Repository Consolidated & Archived (2026-11):** This package has been consolidated into **[$(System.Collections.Hashtable.Target)](https://github.com/ian-cowley/Glacier.Cluster)** (namespace `Glacier.Cluster.Distributed`). Please reference the `Glacier.Cluster` NuGet package (v1.2.0+) for all future updates.
+
+---
 ![Glacier.Inference.Distributed Banner](assets/banner.jpg)
 
 # Glacier.Inference.Distributed
@@ -447,3 +451,4 @@ Part of the **[Glacier Ecosystem](https://glaciersoftware.dev/)** — high-perfo
 * ☕ **Buy Me a Coffee**: [buymeacoffee.com/glaciersoftware](https://buymeacoffee.com/glaciersoftware)
 * ❤️ **GitHub Sponsors**: [github.com/sponsors/ian-cowley](https://github.com/sponsors/ian-cowley)
 * 🐙 **All Repositories**: [github.com/ian-cowley](https://github.com/ian-cowley)
+
